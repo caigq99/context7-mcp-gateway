@@ -80,6 +80,65 @@ test('unauthenticated user sees Linux.do sign-in and no private console data', a
   await expect(page.getByRole('link', { name: 'Administrator access' })).toBeVisible();
 });
 
+test('admin registration unwraps the WebAuthn publicKey envelope', async ({ page, context }) => {
+  const cdp = await context.newCDPSession(page);
+  await cdp.send('WebAuthn.enable');
+  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    options: {
+      protocol: 'ctap2',
+      transport: 'internal',
+      hasResidentKey: false,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+  type FinishBody = { credential: { id: string; type: string; response: { clientDataJSON: string } } };
+  let finishBody: FinishBody | null = null;
+  await page.route('**/api/admin/auth/session', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ authenticated: false, passkey_available: true }),
+  }));
+  await page.route('**/api/admin/auth/register/start', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      publicKey: {
+        rp: { name: 'Context7 Gateway', id: 'localhost' },
+        user: { id: 'dXNlci0x', name: 'gateway-admin', displayName: 'Context7 Gateway Administrator' },
+        challenge: 'AAECAwQFBgcICQoLDA0ODw',
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+        timeout: 60_000,
+        attestation: 'none',
+        authenticatorSelection: { residentKey: 'discouraged', userVerification: 'required' },
+        extensions: { credProps: true },
+      },
+    }),
+  }));
+  await page.route('**/api/admin/auth/register/finish', async (route) => {
+    finishBody = route.request().postDataJSON() as FinishBody;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ authenticated: true, passkey_available: true }),
+    });
+  });
+
+  await page.goto('http://localhost:4173/admin/login');
+  await page.getByRole('button', { name: 'Register a passkey' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Passkey name').fill('Test passkey');
+  await dialog.getByLabel('One-time enrollment code').fill('test-enrollment-code');
+  await dialog.getByRole('button', { name: 'Register a passkey' }).click();
+
+  await expect.poll(() => finishBody).toMatchObject({ credential: { type: 'public-key' } });
+  expect(finishBody?.credential.id).toEqual(expect.any(String));
+  expect(finishBody?.credential.response.clientDataJSON).toEqual(expect.any(String));
+  await expect(dialog).toHaveCount(0);
+  await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId });
+});
+
 test('overview renders real quota status, usage and request activity', async ({ page }) => {
   await page.goto('/console/dashboard');
   await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();

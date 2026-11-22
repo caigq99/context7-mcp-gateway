@@ -8,6 +8,7 @@ import { useLanguage } from './i18n';
 import { Link } from './navigation';
 
 export type AdminSession = { authenticated: boolean; passkey_available: boolean };
+type WebAuthnOptions<TOptions> = { publicKey: TOptions };
 const authPath = '/api/admin/auth';
 
 export function UserSignIn() {
@@ -51,8 +52,8 @@ export function AdminSignIn({ available, onSuccess }: { available: boolean; onSu
         <div className="actions">
           <button className="button button-primary" type="button" disabled={!supported || mutation.busy}
             onClick={() => void mutation.run(async () => {
-              const start = await api<PublicKeyCredentialRequestOptionsJSON>(`${authPath}/login/start`, { method: 'POST' });
-              const credential = await performPasskey(() => startAuthentication({ optionsJSON: start }));
+              const start = await api<WebAuthnOptions<PublicKeyCredentialRequestOptionsJSON>>(`${authPath}/login/start`, { method: 'POST' });
+              const credential = await performPasskey(() => startAuthentication({ optionsJSON: start.publicKey }));
               await api<AdminSession>(`${authPath}/login/finish`, { method: 'POST', body: { credential } });
               onSuccess();
             })}>
@@ -70,7 +71,8 @@ export function AdminSignIn({ available, onSuccess }: { available: boolean; onSu
 async function performPasskey<T>(perform: () => Promise<T>) {
   try {
     return await perform();
-  } catch {
+  } catch (error) {
+    console.error('WebAuthn ceremony failed', error);
     throw new ApiError(400, 'passkey_failed', null);
   }
 }
@@ -94,10 +96,10 @@ export function RegisterPasskey({ requireCode = false, onClose, onSuccess }: {
       const codeInput = event.currentTarget.elements.namedItem('enrollment_code');
       if (codeInput instanceof HTMLInputElement) codeInput.value = '';
       void mutation.run(async () => {
-        const start = await api<PublicKeyCredentialCreationOptionsJSON>(`${authPath}/register/start`, {
+        const start = await api<WebAuthnOptions<PublicKeyCredentialCreationOptionsJSON>>(`${authPath}/register/start`, {
           method: 'POST', body: { name, enrollment_code },
         });
-        const credential = await performPasskey(() => startRegistration({ optionsJSON: start }));
+        const credential = await performPasskey(() => startRegistration({ optionsJSON: start.publicKey }));
         await api<AdminSession>(`${authPath}/register/finish`, { method: 'POST', body: { credential } });
         onClose();
         onSuccess();

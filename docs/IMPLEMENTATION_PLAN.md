@@ -175,7 +175,7 @@ MCP/HTTP Client
 | Phase 2 — 身份与密钥池 | **实现完成；外部 OAuth 配置待部署验证** | Linux.do state+PKCE、浏览器会话、Passkey 管理员及初始/恢复注册码、上游密钥加密、单条/批量导入（最多 100 条，逐项报告重复/无效且不回显原值）、Gateway Key scope/expiry/rotate/revoke 已实现；Passkey 有软件认证器端到端测试。 |
 | Phase 3 — MCP/REST 代理 | **实现与 mock 验收完成；真实 session 仍待部署观测** | 2026-11-22 经本地 Gateway 的 MCP `tools/list`/两个标准工具和四条 REST 均成功；mock 覆盖 401/403/429/5xx、熔断、session 跨 Token 隔离和 SSE 恢复不重复扣费。上游未下发真实 session，部署后应再观测一次 session 生命周期。 |
 | Phase 4 — 配额与用量 | **实现完成** | 原子预留/结算、并发与边界测试、请求事件、配额汇总、保留期和 60 秒清理已接入。 |
-| Phase 5 — 控制台 | **实现完成** | 中英文用户/管理员界面、批量上游 Key 导入和设置指南已接入；Playwright 流程 12/12 通过，`npm run build` 通过。 |
+| Phase 5 — 控制台 | **实现完成** | 中英文用户/管理员界面、批量上游 Key 导入和设置指南已接入；Playwright 流程 13/13 通过（含虚拟 WebAuthn 认证器注册），`npm run build` 通过。 |
 | Phase 6 — 本地订单/额度 | **本地流程完成；真实支付未纳入** | 本地积分账本、兑换码、签名沙箱订单、反向调账和对账 API/UI 已实现；生产 payment provider 故意禁用，订单额度是 Gateway 本地额度。 |
 | Phase 7 — 发布加固 | **实现与容器验收完成；审计/演练待外部执行** | 非 root、只读 rootfs、cap-drop、no-new-privileges 的生产 Compose 已实测健康；镜像构建成功；SQLite 备份/恢复演练、`npm audit`（生产依赖 0 漏洞）与 Compose 配置检查通过。独立安全评审、生产负载与部署特定恢复演练仍未完成。 |
 
