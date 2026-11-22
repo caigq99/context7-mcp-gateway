@@ -1,7 +1,7 @@
-import { ArrowLeft, Database, KeyRound, Megaphone, Plus, RefreshCw, Search, UsersRound } from 'lucide-react';
+import { ArrowLeft, Database, KeyRound, Megaphone, Plus, RefreshCw, Search, Upload, UsersRound } from 'lucide-react';
 import { useState } from 'react';
 import { api, operations, quotaLimits } from './api';
-import type { AdminUser, Announcement, KeyUsage, LedgerEntry, Order, Pool, QuotaAssignment, QuotaLimits, Settings, UpstreamKey } from './api';
+import type { AdminUser, Announcement, BulkKeyImportResponse, BulkKeyImportStatus, KeyUsage, LedgerEntry, Order, Pool, QuotaAssignment, QuotaLimits, Settings, UpstreamKey } from './api';
 import { PasskeySettings } from './auth';
 import { Confirm, CopyBlock, Dialog, EmptyState, ErrorNotice, PageHeading, Panel, Resource, StatusChip, Time, useMutation, useResource } from './components';
 import { useLanguage } from './i18n';
@@ -13,6 +13,12 @@ import { price } from './billing-page';
 
 const poolPath = '/api/admin/pools';
 const usersPath = '/api/admin/users';
+const bulkImportLimit = 100;
+const bulkStatusLabel: Record<BulkKeyImportStatus, Text> = {
+  created: 'bulkImportCreated',
+  duplicate: 'bulkImportDuplicates',
+  invalid: 'bulkImportInvalid',
+};
 
 export function PoolPage({ poolId }: { poolId?: string }) {
   const { t } = useLanguage();
@@ -82,6 +88,7 @@ function PoolDetails({ pool, refresh }: { pool: Pool; refresh: () => void }) {
   const mutation = useMutation();
   const [poolConfirm, setPoolConfirm] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [bulkImporting, setBulkImporting] = useState(false);
   const [action, setAction] = useState<KeyAction | null>(null);
   const [validation, setValidation] = useState<{ status: string; upstream_status: number } | null>(null);
   function keyPath(key: UpstreamKey) {
@@ -106,6 +113,7 @@ function PoolDetails({ pool, refresh }: { pool: Pool; refresh: () => void }) {
     </Panel>
     <Panel title={t('poolKeys')} actions={<>
       <button className="button button-quiet icon-button" type="button" aria-label={t('refresh')} onClick={keys.refresh}><RefreshCw size={16} aria-hidden="true" /></button>
+      <button className="button" type="button" onClick={() => setBulkImporting(true)}><Upload size={16} aria-hidden="true" />{t('bulkImport')}</button>
       <button className="button button-primary" type="button" onClick={() => setAdding(true)}><Plus size={16} aria-hidden="true" />{t('addUpstreamKey')}</button>
     </>}>
       <ErrorNotice error={mutation.error} />
@@ -141,6 +149,7 @@ function PoolDetails({ pool, refresh }: { pool: Pool; refresh: () => void }) {
     </Panel>
     {poolConfirm && <Confirm title="disablePoolTitle" help="disablePoolHelp" yes="disable" onClose={() => setPoolConfirm(false)} onConfirm={() => toggle(false)} />}
     {adding && <NewUpstreamKey path={`${path}/keys`} onClose={() => setAdding(false)} onSuccess={() => { setAdding(false); setValidation(null); keys.refresh(); }} />}
+    {bulkImporting && <BulkImportUpstreamKeys path={`${path}/keys/bulk`} onClose={() => setBulkImporting(false)} onSuccess={() => { setValidation(null); keys.refresh(); }} />}
     {action?.type === 'usage' && <KeyUsageDialog path={`${keyPath(action.key)}/usage`} onClose={() => setAction(null)} />}
     {action?.type === 'disable' && <Confirm title="disableKeyTitle" help="disableKeyHelp" yes="disable" onClose={() => setAction(null)} onConfirm={async () => {
       await api<void>(`${keyPath(action.key)}/status`, { method: 'PATCH', body: { status: 'disabled' } });
@@ -174,6 +183,65 @@ function NewUpstreamKey({ path, onClose, onSuccess }: { path: string; onClose: (
       <label className="field">{t('upstreamKeyInput')}<input type="password" required name="api_key" maxLength={1024} autoComplete="off" spellCheck={false} autoFocus /></label>
       <ErrorNotice error={mutation.error} />
       <FormActions busy={mutation.busy} submit="create" onClose={onClose} />
+    </form>
+  </Dialog>;
+}
+
+function BulkImportUpstreamKeys({ path, onClose, onSuccess }: { path: string; onClose: () => void; onSuccess: () => void }) {
+  const { t } = useLanguage();
+  const mutation = useMutation();
+  const [input, setInput] = useState('');
+  const [clientError, setClientError] = useState<Text | null>(null);
+  const [summary, setSummary] = useState<BulkKeyImportResponse | null>(null);
+  return <Dialog title={t('bulkImport')} onClose={() => { if (!mutation.busy) onClose(); }}>
+    <p>{t('bulkImportHelp')}</p>
+    <form onSubmit={(event) => {
+      event.preventDefault();
+      const api_keys = bulkKeys(input);
+      setClientError(null);
+      setSummary(null);
+      mutation.clear();
+      if (api_keys.length === 0) {
+        setClientError('bulkImportEmpty');
+        return;
+      }
+      if (api_keys.length > bulkImportLimit) {
+        setClientError('bulkImportTooMany');
+        return;
+      }
+      void mutation.run(async () => {
+        const result = await api<BulkKeyImportResponse>(path, { method: 'POST', body: { api_keys } });
+        setSummary(result);
+        if (result.created === result.results.length) setInput('');
+        onSuccess();
+      });
+    }}>
+      <label className="field">{t('bulkImportInput')}
+        <textarea name="api_keys" rows={9} value={input} disabled={mutation.busy} spellCheck={false} autoComplete="off" autoFocus
+          onChange={(event) => {
+            setInput(event.currentTarget.value);
+            setClientError(null);
+            setSummary(null);
+          }} />
+      </label>
+      <p className="field-help">{t('bulkImportLimit')}</p>
+      {clientError && <div className="notice error-notice" role="alert">{t(clientError)}</div>}
+      <ErrorNotice error={mutation.error} />
+      {summary && <>
+        <div className="notice success-notice" role="status">
+          {t('bulkImportCreated')} {summary.created} · {t('bulkImportDuplicates')} {summary.duplicates} · {t('bulkImportInvalid')} {summary.invalid}
+        </div>
+        {summary.created !== summary.results.length && <p className="field-help" role="status">{t('bulkImportRetained')}</p>}
+        <ol className="bulk-import-results" aria-label={t('bulkImportResults')}>
+          {summary.results.map((result) => <li key={result.index} data-status={result.status}>
+            <span>#{result.index + 1}</span><strong>{t(bulkStatusLabel[result.status])}</strong>
+          </li>)}
+        </ol>
+      </>}
+      <div className="actions modal-actions">
+        <button type="button" className="button" disabled={mutation.busy} onClick={onClose}>{t('bulkImportClose')}</button>
+        <button type="submit" className="button button-primary" disabled={mutation.busy}>{t(mutation.busy ? 'loading' : 'bulkImportSubmit')}</button>
+      </div>
     </form>
   </Dialog>;
 }
@@ -451,6 +519,10 @@ export function FormActions({ busy, submit, onClose }: { busy: boolean; submit: 
 
 function formText(fields: FormData, key: string) {
   return String(fields.get(key) ?? '').trim();
+}
+
+function bulkKeys(input: string) {
+  return input.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
 export function AdminBilling() {

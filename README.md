@@ -4,11 +4,11 @@ Context7 MCP Gateway is a self-hostable, Rust-based gateway for Context7. The op
 
 ## Implementation status
 
-The first end-to-end implementation is in place: Context7 MCP and four read-only REST proxies; encrypted operator-maintained upstream keys; Gateway Key scopes, expiry, rotation and revocation; Linux.do OAuth/PKCE user sessions; Passkey-only production administration; atomic local quota accounting and request history; user/admin consoles; client setup guides; announcements; and local quota-credit, redemption and sandbox order flows. See the phase status and remaining verification gates in [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
+The first end-to-end implementation is in place: Context7 MCP and four read-only REST proxies; encrypted operator-maintained upstream keys with single and bulk import; Gateway Key scopes, expiry, rotation and revocation; Linux.do OAuth/PKCE user sessions; Passkey-only production administration; atomic local quota accounting and request history; user/admin consoles; client setup guides; announcements; and local quota-credit, redemption and sandbox order flows. See the phase status and remaining verification work in [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
-**This is not an authorization approval or an automatic production go-live.** Before sharing an upstream pool with other users, confirm in writing that the maintained Context7 account/Teamspace and the intended audience are permitted. The repository intentionally disables production payment providers and account registration by default; production operators must configure a valid default pool and explicitly open registration after review. The image build and a hardened Compose smoke are verified in this workspace; an independent security review and deployment-specific drills remain release gates.
+**The operator declares and maintains the upstream keys; this repository does not verify upstream contractual permissions.** The operator is responsible for using each key within its intended account/Teamspace and user scope. Registration remains closed by default and is opened only by an administrator after the configured default pool has an eligible active key and the OAuth and cryptographic configuration prerequisites are met. The repository intentionally disables production payment providers; the image build and a hardened Compose smoke are verified in this workspace, while an independent security review and deployment-specific drills remain release gates.
 
-The Phase 0 authorization gate in the plan must be satisfied before operating a shared upstream pool for external users. Keys must be used within the permitted account/Teamspace and user scope; key rotation must not be used to evade upstream limits.
+Phase 0 is an operator declaration plus upstream contract verification, recorded in [`docs/phase0-operator-record.md`](docs/phase0-operator-record.md); it is not a blocking external review. Regardless of registration state, upstream `401`/`403`/`429` responses are honored, and keys must not be rotated to evade upstream rate limits or access controls.
 
 ## Development prerequisites
 
@@ -52,6 +52,6 @@ cd web && npm ci && npm run build
 - [`docs/operations.md`](docs/operations.md): current bootstrap workflows and planned operator procedures.
 - [`docs/client-setup.md`](docs/client-setup.md): Gateway Key, MCP and REST usage.
 - [`docs/context7-upstream-contract.md`](docs/context7-upstream-contract.md): observed API/MCP contracts and remaining untested error cases.
-- [`docs/phase0-authorization-record.md`](docs/phase0-authorization-record.md): operator sign-off template for the release-blocking upstream authorization gate.
+- [`docs/phase0-operator-record.md`](docs/phase0-operator-record.md): operator declaration of upstream key responsibility and the runtime registration prerequisites.
 - [`docs/admin-auth.md`](docs/admin-auth.md): Passkey onboarding/recovery.
 - [`docs/quota-and-billing.md`](docs/quota-and-billing.md): quota, usage, credits, redemptions and disabled payment sandbox.

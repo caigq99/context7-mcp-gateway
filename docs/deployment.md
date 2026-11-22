@@ -1,6 +1,6 @@
 # 部署、升级与数据保护
 
-本文描述单节点生产部署。当前 Gateway 使用 SQLite 与 Docker Compose named volume，**不要配置多个 Gateway 副本共用此文件**。打开多租户注册前，必须确认管理员所维护的 Context7 Key 与相应账户/Teamspace 授权允许对目标用户群提供网关服务；密钥池不可用作规避官方限额、访问限制或授权范围的回退机制。
+本文描述单节点生产部署。当前 Gateway 使用 SQLite 与 Docker Compose named volume，**不要配置多个 Gateway 副本共用此文件**。运营者声明自行维护 Context7 API Key，并对其预期用途、账户/Teamspace 边界和用户范围负责；本仓库不核验上游合同许可。注册默认关闭，只有管理员在默认池包含可调度的 active Key 且 OAuth/加密配置就绪后才能开启。密钥池不可用作规避官方限额、访问限制或授权范围的回退机制；网关遵循上游 `401`/`403`/`429`（含 `Retry-After`），不得通过轮换或新增 Key 规避限流或访问控制。
 
 ## 生产配置
 
@@ -21,7 +21,7 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 - `APP_ENV=production`，`PUBLIC_ORIGIN=https://<DNS hostname>`：Public origin 必须是无路径、无查询的 HTTPS DNS Origin；浏览器中使用的协议、域名和端口必须匹配。Passkey Cookie 只有在 HTTPS 下才会发出。
 - `GATEWAY_ENCRYPTION_KEY` 和 `GATEWAY_TOKEN_PEPPER`：独立的 32 字节 base64url 秘密。不要丢失、轮换或在多个环境中复用。
 - Linux.do OAuth：`LINUXDO_OAUTH_ENABLED=true`，Client ID/Secret 和精确 callback `https://<hostname>/auth/linuxdo/callback`。
-- `DEFAULT_UPSTREAM_POOL_ID`：准备开放自助注册前，设置到已确认授权且状态有效的池。
+- `DEFAULT_UPSTREAM_POOL_ID`：默认注册池的 ID。开启注册前，该池必须已启用且至少有一把可调度的 active Key（未被池级限流或熔断），否则设置接口拒绝开启。
 - `GATEWAY_EVENT_RETENTION_DAYS`：可选整数 `1..=365`，默认为 `30`。
 
 不要在生产配置设置 `GATEWAY_ADMIN_TOKEN`；程序拒绝非空生产 Bearer token。管理员用 HTTPS Passkey 会话工作，首次注册和恢复使用部署主机本地 CLI 的一次性验证码（见 [`admin-auth.md`](admin-auth.md)）。
@@ -50,7 +50,9 @@ curl --fail --silent https://gateway.example.com/health/ready
 docker compose exec context7-gateway context7-gateway admin issue-enrollment
 ```
 
-在 `https://<hostname>/admin/login` 输入注册码并完成浏览器 Passkey 注册。登录后创建获得授权的 Context7 Pool、录入与验证 Key。之后把返回的 Pool ID 写到 `DEFAULT_UPSTREAM_POOL_ID` 并重启 Compose；在上线前实际测试 OAuth 回调、Gateway Key 与获授权的上下游用法。不可通过未经支持的 SQL 写入绕过管理员流程。
+在 `https://<hostname>/admin/login` 输入注册码并完成浏览器 Passkey 注册。登录后创建 Context7 Pool、录入并验证 Key（可单条录入，或用 `POST /api/admin/pools/$POOL_ID/keys/bulk` 批量导入，导入项初始为 `pending`）。之后把返回的 Pool ID 写到 `DEFAULT_UPSTREAM_POOL_ID` 并重启 Compose；在上线前实际测试 OAuth 回调、Gateway Key 与上游用法。不可通过未经支持的 SQL 写入绕过管理员流程。
+
+注册开关只做运行时配置检查：`PATCH /api/admin/settings` 设置 `registration_open=true` 时，服务会验证默认池已启用、存在可调度 Key，并确认 Linux.do OAuth 与两项密码学秘密已配置；不满足时拒绝开启。该检查不验证上游合同许可，运营者仍需按 [`phase0-operator-record.md`](phase0-operator-record.md) 的声明使用 Key。
 
 若管理员 Passkey 丢失，使用 [`admin-auth.md`](admin-auth.md) 中的 `--recovery` 流程重新绑定；旧 Passkey 和会话在新 Passkey 验证成功后一起撤销。
 

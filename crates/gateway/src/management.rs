@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, RETRY_AFTER},
@@ -47,6 +47,7 @@ pub enum ApiErrorCode {
     Conflict,
     MethodNotAllowed,
     InvalidRequest,
+    PayloadTooLarge,
     NotConfigured,
     PoolUnavailable,
     CredentialUnavailable,
@@ -79,6 +80,7 @@ impl IntoResponse for ApiError {
             ApiErrorCode::Forbidden | ApiErrorCode::RegistrationClosed => StatusCode::FORBIDDEN,
             ApiErrorCode::NotFound | ApiErrorCode::InvalidSession => StatusCode::NOT_FOUND,
             ApiErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+            ApiErrorCode::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ApiErrorCode::Conflict => StatusCode::CONFLICT,
             ApiErrorCode::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             ApiErrorCode::NotConfigured
@@ -121,6 +123,39 @@ pub struct CreatePoolRequest {
 pub struct CreateKeyRequest {
     pub api_key: String,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct BulkCreateKeysRequest {
+    pub api_keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkCreateKeysResponse {
+    pub created: usize,
+    pub duplicates: usize,
+    pub invalid: usize,
+    pub results: Vec<BulkKeyImportResult>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkKeyImportStatus {
+    Created,
+    Duplicate,
+    Invalid,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkKeyImportResult {
+    pub index: usize,
+    pub status: BulkKeyImportStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_prefix: Option<String>,
+}
+
+const MAX_BULK_UPSTREAM_KEYS: usize = 100;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
@@ -256,9 +291,10 @@ pub async fn create_upstream_key(
     State(state): State<AppState>,
     Path(pool_id): Path<String>,
     headers: HeaderMap,
-    Json(request): Json<CreateKeyRequest>,
+    payload: Result<Json<CreateKeyRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<UpstreamKeySummary>), ApiError> {
     let actor = authorize_admin(&state, &headers).await?;
+    let Json(request) = payload.map_err(map_key_json_rejection)?;
     let pool_id = PoolId(pool_id);
     let exists =
         sqlx::query_scalar::<_, i64>("SELECT 1 FROM upstream_pools WHERE id = ? AND enabled = 1")
@@ -273,13 +309,8 @@ pub async fn create_upstream_key(
         .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
     let id = UpstreamKeyId(Uuid::new_v4().simple().to_string());
     let api_key = zeroize::Zeroizing::new(request.api_key);
-    let api_key = api_key.trim();
-    if api_key.len() > 256
-        || !api_key.starts_with("ctx7sk-")
-        || api_key.bytes().any(|c| !c.is_ascii_graphic())
-    {
-        return Err(ApiError::new(ApiErrorCode::InvalidRequest));
-    }
+    let api_key = valid_upstream_key(api_key.as_str())
+        .ok_or_else(|| ApiError::new(ApiErrorCode::InvalidRequest))?;
     let encrypted = cipher
         .encrypt(&id, &pool_id, api_key)
         .map_err(|_| ApiError::new(ApiErrorCode::InvalidRequest))?;
@@ -307,6 +338,143 @@ pub async fn create_upstream_key(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(UpstreamKeySummary::from(record))))
+}
+
+pub async fn bulk_create_upstream_keys(
+    State(state): State<AppState>,
+    Path(pool_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<BulkCreateKeysRequest>, JsonRejection>,
+) -> Result<Json<BulkCreateKeysResponse>, ApiError> {
+    let actor = authorize_admin(&state, &headers).await?;
+    let Json(request) = payload.map_err(map_key_json_rejection)?;
+    if request.api_keys.is_empty() || request.api_keys.len() > MAX_BULK_UPSTREAM_KEYS {
+        return Err(ApiError::new(ApiErrorCode::InvalidRequest));
+    }
+    let requested = request.api_keys.len();
+    let keys: Vec<_> = request
+        .api_keys
+        .into_iter()
+        .map(zeroize::Zeroizing::new)
+        .collect();
+    let pool_id = PoolId(pool_id);
+    let exists =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM upstream_pools WHERE id = ? AND enabled = 1")
+            .bind(&pool_id.0)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(map_database_error)?;
+    if exists.is_none() {
+        return Err(ApiError::new(ApiErrorCode::NotFound));
+    }
+    let cipher = CredentialCipher::new(state.config.encryption_key)
+        .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
+    let mut tx = state
+        .pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(map_database_error)?;
+    let mut created = 0usize;
+    let mut duplicates = 0usize;
+    let mut invalid = 0usize;
+    let mut results = Vec::with_capacity(requested);
+    let mut seen = std::collections::HashSet::with_capacity(requested);
+
+    for (index, api_key) in keys.into_iter().enumerate() {
+        let Some(api_key) = valid_upstream_key(api_key.as_str()) else {
+            invalid += 1;
+            results.push(BulkKeyImportResult {
+                index,
+                status: BulkKeyImportStatus::Invalid,
+                key_id: None,
+                display_prefix: None,
+            });
+            continue;
+        };
+        let fingerprint = crate::session::upstream_fingerprint(api_key, state.config.token_pepper)
+            .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
+        if !seen.insert(fingerprint) {
+            duplicates += 1;
+            results.push(BulkKeyImportResult {
+                index,
+                status: BulkKeyImportStatus::Duplicate,
+                key_id: None,
+                display_prefix: None,
+            });
+            continue;
+        }
+
+        let id = UpstreamKeyId(Uuid::new_v4().simple().to_string());
+        let encrypted = cipher
+            .encrypt(&id, &pool_id, api_key)
+            .map_err(|_| ApiError::new(ApiErrorCode::InvalidRequest))?;
+        let display_prefix = format!("ctx7_{}…", &id.0[..4]);
+        let record = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>, String)>(
+            "INSERT INTO upstream_keys(id, pool_id, ciphertext, nonce, display_prefix, credential_fingerprint) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(credential_fingerprint) WHERE deleted_at IS NULL DO NOTHING RETURNING id, pool_id, display_prefix, status, last_checked_at, last_used_at, created_at",
+        )
+        .bind(&id.0)
+        .bind(&pool_id.0)
+        .bind(encrypted.ciphertext)
+        .bind(encrypted.nonce.to_vec())
+        .bind(&display_prefix)
+        .bind(fingerprint.to_vec())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_database_error)?;
+        let Some(record) = record else {
+            duplicates += 1;
+            results.push(BulkKeyImportResult {
+                index,
+                status: BulkKeyImportStatus::Duplicate,
+                key_id: None,
+                display_prefix: None,
+            });
+            continue;
+        };
+
+        created += 1;
+        let summary = UpstreamKeySummary::from(record);
+        results.push(BulkKeyImportResult {
+            index,
+            status: BulkKeyImportStatus::Created,
+            key_id: Some(summary.id.clone()),
+            display_prefix: Some(summary.display_prefix),
+        });
+        write_audit(
+            &mut *tx,
+            &actor,
+            "upstream_key.create",
+            "upstream_key",
+            &summary.id,
+        )
+        .await?;
+    }
+
+    let details = serde_json::json!({
+        "requested": requested,
+        "created": created,
+        "duplicates": duplicates,
+        "invalid": invalid,
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO admin_audit_events(id, actor, action, object_type, object_id, details_json) VALUES (?, ?, 'upstream_key.bulk_import', 'upstream_pool', ?, ?)",
+    )
+    .bind(Uuid::new_v4().simple().to_string())
+    .bind(&actor)
+    .bind(&pool_id.0)
+    .bind(details)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_database_error)?;
+    tx.commit().await.map_err(map_database_error)?;
+
+    Ok(Json(BulkCreateKeysResponse {
+        created,
+        duplicates,
+        invalid,
+        results,
+    }))
 }
 
 pub async fn list_upstream_keys(
@@ -905,6 +1073,24 @@ fn clean_scope(value: &str) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
+fn valid_upstream_key(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 256
+        && value.starts_with("ctx7sk-")
+        && value.bytes().all(|c| c.is_ascii_graphic()))
+    .then_some(value)
+}
+
+fn map_key_json_rejection(rejection: JsonRejection) -> ApiError {
+    if let JsonRejection::BytesRejection(rejection) = rejection
+        && rejection.into_response().status() == StatusCode::PAYLOAD_TOO_LARGE
+    {
+        return ApiError::new(ApiErrorCode::PayloadTooLarge);
+    }
+    ApiError::new(ApiErrorCode::InvalidRequest)
+}
+
 pub(crate) async fn write_audit<'a>(
     executor: impl sqlx::Executor<'a, Database = sqlx::Sqlite>,
     actor: &str,
@@ -942,9 +1128,10 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        AppState, CreateGatewayTokenRequest, CreateKeyRequest, CreatePoolRequest,
-        CreateUserRequest, authenticate_gateway_token, create_gateway_token, create_pool,
-        create_upstream_key, create_user, list_gateway_tokens, list_pools, revoke_gateway_token,
+        AppState, BulkCreateKeysRequest, BulkKeyImportStatus, CreateGatewayTokenRequest,
+        CreateKeyRequest, CreatePoolRequest, CreateUserRequest, authenticate_gateway_token,
+        bulk_create_upstream_keys, create_gateway_token, create_pool, create_upstream_key,
+        create_user, list_gateway_tokens, list_pools, list_upstream_keys, revoke_gateway_token,
     };
     use crate::{
         config::{Config, Environment},
@@ -1048,9 +1235,9 @@ mod tests {
             State(state.clone()),
             axum::extract::Path(created_pool.id.clone()),
             admin.clone(),
-            Json(CreateKeyRequest {
+            Ok(Json(CreateKeyRequest {
                 api_key: secret_key.to_owned(),
-            }),
+            })),
         )
         .await
         .expect("key encrypted and saved");
@@ -1120,5 +1307,93 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn bulk_upstream_key_import_reports_without_echoing_secret_values() {
+        let state = test_state(Some("bootstrap-secret-that-is-long-enough-123")).await;
+        let admin = admin_headers("bootstrap-secret-that-is-long-enough-123");
+        let (_, pool) = create_pool(
+            State(state.clone()),
+            admin.clone(),
+            Json(CreatePoolRequest {
+                name: "bulk-teamspace".to_owned(),
+                authorization_scope: "operator-managed-source".to_owned(),
+            }),
+        )
+        .await
+        .expect("pool created");
+        let valid = "ctx7sk-bulk-private-value-0001";
+        let invalid = "not-a-context7-key";
+        let imported = bulk_create_upstream_keys(
+            State(state.clone()),
+            axum::extract::Path(pool.id.clone()),
+            admin.clone(),
+            Ok(Json(BulkCreateKeysRequest {
+                api_keys: vec![format!("  {valid}  "), valid.to_owned(), invalid.to_owned()],
+            })),
+        )
+        .await
+        .expect("bulk import accepts mixed entries");
+        assert_eq!(imported.0.created, 1);
+        assert_eq!(imported.0.duplicates, 1);
+        assert_eq!(imported.0.invalid, 1);
+        assert_eq!(
+            imported
+                .0
+                .results
+                .iter()
+                .map(|result| result.status)
+                .collect::<Vec<_>>(),
+            vec![
+                BulkKeyImportStatus::Created,
+                BulkKeyImportStatus::Duplicate,
+                BulkKeyImportStatus::Invalid,
+            ]
+        );
+        let serialized = serde_json::to_string(&imported.0).expect("response serializes");
+        assert!(!serialized.contains(valid));
+        assert!(!serialized.contains(invalid));
+
+        let keys = list_upstream_keys(
+            State(state.clone()),
+            axum::extract::Path(pool.id.clone()),
+            admin.clone(),
+        )
+        .await
+        .expect("admin lists imported keys");
+        assert_eq!(keys.0.len(), 1);
+        assert_eq!(keys.0[0].status, "pending");
+        let ciphertext = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT ciphertext FROM upstream_keys WHERE pool_id = ?",
+        )
+        .bind(&pool.id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("encrypted row exists");
+        assert!(!String::from_utf8_lossy(&ciphertext).contains(valid));
+        let details = sqlx::query_scalar::<_, String>(
+            "SELECT details_json FROM admin_audit_events WHERE action = 'upstream_key.bulk_import' ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("bulk audit event exists");
+        assert!(details.contains("\"created\":1"));
+        assert!(details.contains("\"duplicates\":1"));
+        assert!(details.contains("\"invalid\":1"));
+
+        let repeated = bulk_create_upstream_keys(
+            State(state.clone()),
+            axum::extract::Path(pool.id.clone()),
+            admin,
+            Ok(Json(BulkCreateKeysRequest {
+                api_keys: vec![valid.to_owned()],
+            })),
+        )
+        .await
+        .expect("repeat import is handled");
+        assert_eq!(repeated.0.created, 0);
+        assert_eq!(repeated.0.duplicates, 1);
+        assert_eq!(repeated.0.invalid, 0);
     }
 }

@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderName, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -42,7 +42,13 @@ pub fn router(config: Config, pool: SqlitePool, http: reqwest::Client) -> Router
         )
         .route(
             "/api/admin/pools/{pool_id}/keys",
-            get(management::list_upstream_keys).post(management::create_upstream_key),
+            get(management::list_upstream_keys)
+                .post(management::create_upstream_key)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/pools/{pool_id}/keys/bulk",
+            post(management::bulk_create_upstream_keys).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/api/admin/pools/{pool_id}/keys/{key_id}/status",
@@ -301,9 +307,13 @@ mod tests {
     };
     use axum::{
         body::Body,
-        http::{Request, StatusCode},
+        http::{
+            Request, StatusCode,
+            header::{AUTHORIZATION, CONTENT_TYPE},
+        },
     };
     use http_body_util::BodyExt;
+    use sha2::{Digest, Sha256};
     use sqlx::SqlitePool;
     use std::path::PathBuf;
     use tower::ServiceExt;
@@ -421,6 +431,118 @@ mod tests {
             .await
             .expect("router responds");
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn bulk_upstream_key_route_accepts_development_admin_bearer() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO upstream_pools(id, name, authorization_scope) VALUES ('pool-bulk', 'pool-bulk', 'operator-source')",
+        )
+        .execute(&pool)
+        .await
+        .expect("pool exists");
+        let token = "bootstrap-secret-that-is-long-enough-123";
+        let mut config = test_config();
+        config.admin_token_digest = Some(Sha256::digest(token.as_bytes()).into());
+        let response = router(config, pool, test_http())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/pools/pool-bulk/keys/bulk")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"api_keys":["ctx7sk-route-test-private-value"]}"#,
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body reads")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
+        assert_eq!(payload["created"], 1);
+        assert_eq!(payload["duplicates"], 0);
+        assert_eq!(payload["invalid"], 0);
+        assert!(!String::from_utf8_lossy(&body).contains("ctx7sk-route-test-private-value"));
+    }
+
+    #[tokio::test]
+    async fn malformed_key_json_is_rejected_without_echoing_secret_values() {
+        let token = "bootstrap-secret-that-is-long-enough-123";
+        let mut config = test_config();
+        config.admin_token_digest = Some(Sha256::digest(token.as_bytes()).into());
+        let app = router(config, test_pool().await, test_http());
+        for (uri, secret, body) in [
+            (
+                "/api/admin/pools/pool/keys",
+                "ctx7sk-shape-secret-single",
+                r#"{"api_key":["ctx7sk-shape-secret-single"]}"#,
+            ),
+            (
+                "/api/admin/pools/pool/keys/bulk",
+                "ctx7sk-shape-secret-bulk",
+                r#"{"api_keys":"ctx7sk-shape-secret-bulk"}"#,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("router responds");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body reads")
+                .to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
+            assert_eq!(payload["error"], "invalid_request");
+            assert!(!String::from_utf8_lossy(&body).contains(secret));
+        }
+
+        let oversized = serde_json::json!({
+            "api_keys": vec!["ctx7sk-".to_owned() + &"x".repeat(300); 300],
+        })
+        .to_string();
+        assert!(oversized.len() > 64 * 1024);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/pools/pool/keys/bulk")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(oversized))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body reads")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
+        assert_eq!(payload["error"], "payload_too_large");
+        assert!(!String::from_utf8_lossy(&body).contains("ctx7sk-"));
     }
 
     fn test_http() -> reqwest::Client {

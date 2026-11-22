@@ -1,6 +1,6 @@
 # Context7 Upstream Contract Notes
 
-> Status: successful live operator-key tests and local Gateway-through-upstream smoke are recorded. This is not an official guarantee of future behavior, plan allowance or permission to share keys. Controlled negative-status, session-resume and production deployment tests remain open.
+> Status: successful live operator-key tests and local Gateway-through-upstream smoke are recorded. This is not an official guarantee of future behavior or plan allowance. The repository does not verify upstream contractual permission; the operator declares responsibility for key use in [`phase0-operator-record.md`](phase0-operator-record.md). Controlled negative-status, session-resume and production deployment tests remain open and non-blocking for registration.
 
 ## Observed successful contract
 
@@ -24,13 +24,13 @@ Upstream auth is `Authorization: Bearer <Context7 API key>`. The Gateway indepen
 
 MCP new transport validates the `2026-07-28` protocol metadata, `Mcp-Method` and operation name tuple. It does not generate sessions for that transport. Legacy `2025-11-25` transport remaps opaque session identifiers and binds them to the creating Gateway token and upstream key. The live smoke observed SSE but no upstream-issued session; the binding, cross-token rejection, SSE resume and exactly-once business settlement of that path are now covered end to end against a loopback Context7 stand-in (`proxy::mock_tests`).
 
-The code treats upstream `401` as an invalid key, `403` as a permission error that pauses the affected pool for operator review, `429` as a pool cooldown honoring `Retry-After` (later callers get a local `429`), and three consecutive `5xx` as a `503` circuit breaker for the pool. All of these transitions, including "no upstream request while cooled/opened", are exercised by the loopback mock tests. Production still needs one operator-controlled negative test per deployed plan.
+The code treats upstream `401` as an invalid key, `403` as a permission error that disables the affected pool pending operator review, `429` as a pool cooldown honoring `Retry-After` (later callers get a local `429`), and three consecutive `5xx` as a `503` circuit breaker for the pool. All of these transitions, including "no upstream request while cooled/opened", are exercised by the loopback mock tests. Keys are never rotated or reselected to evade these responses. Production still needs one operator-controlled negative test per deployed plan.
 
-## Remaining Phase 0 evidence
+## Remaining Phase 0 verification (non-blocking)
 
-- Collect operator documentation that the upstream account/Teamspace permits the intended user population and proxy sharing.
+- The operator declaration is recorded: the operator maintains the keys, chooses the target pools and user population, and is responsible for their intended use. The repository does not perform an upstream permission review.
 - Session deletion and abrupt live disconnect behavior should still be observed once against the real service; the mock covers resume, cross-token isolation and no duplicate charge.
-- Validate any deployment-specific plan limits, billing/teamspace observations and client compatibility before opening registration.
+- Validate any deployment-specific plan limits, billing/teamspace observations and client compatibility as deployment-readiness checks. Opening registration requires the configured default pool to have an eligible active key and the OAuth and cryptographic configuration prerequisites; it does not require a repository-side upstream permission review.
 - The Docker image and production-like Compose sandbox were verified on 2026-11-22 (health/readiness, non-root, read-only rootfs, writable database volume). Rebuild and re-run the deployment-specific checks on the target host.
 
 ## Public source references

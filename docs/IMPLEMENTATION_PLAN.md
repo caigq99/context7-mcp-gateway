@@ -1,9 +1,12 @@
 # Context7 MCP Gateway — 分阶段实现方案
 
-> 文档状态：实施基线（v1）  
-> 编写日期：2026-11-21  
-> 项目状态：核心代码与控制台已落地；Phase 0 授权记录、受控错误/会话测试、Docker 镜像验证和独立安全评审仍是生产发布 Gate。  
-> 产品方向：运营者自行维护获准使用的 Context7 上游 API Key 池；用户只使用本服务签发的 Gateway API Key。
+> 文档状态：实施基线（v1）
+>
+> 编写日期：2026-11-21；最近更新：2026-11-22
+>
+> 项目状态：核心代码与控制台已落地；Phase 0 为“运营者声明 + 上游契约验证（非阻断）”，声明记录见 [`phase0-operator-record.md`](phase0-operator-record.md)；受控错误/会话测试、部署主机镜像/恢复演练和独立安全评审仍是生产发布 Gate。
+>
+> 产品方向：运营者自行声明、维护并直接录入 Context7 上游 API Key 池；用户只使用本服务签发的 Gateway API Key。
 
 ## 1. 目标与边界
 
@@ -19,15 +22,15 @@
 6. **首期不实现 Context7 管理功能**：不代理 Admin MCP、不管理用户的 Context7 Teamspace、来源、策略或文档库写操作。
 7. **可选支付**：充值仅增加本服务本地额度；支付适配器默认关闭，不能代表或代替 Context7 官方计费。
 
-### 上线前置条件（发布阻断项）
+### 运营者声明与注册前提（非阻断）
 
-Context7 官方资料明确区分 API Key、账户/Teamspace 使用量和访问权限，并限制未经授权的 Key 分享、转售或绕过上游限制。上线前必须由运营者确认：所维护的 Key 及其订阅/Teamspace **允许用于目标用户群和拟提供的网关服务**。本项目不以轮换 Key 的方式躲避 `429`、套餐配额、封禁或访问控制；如果无法确认获准范围，仍可做本地开发和单用户验证，但不得开放多租户生产服务。该条件作为 Phase 0 的正式 Go/No-Go gate，而不是上线后的免责声明。
+Context7 官方资料区分 API Key、账户/Teamspace 使用量和访问权限。本项目不核验 Context7 合同条款，也不验证运营者是否取得上游许可；运营者声明其自行维护拟使用的 Context7 API Key，并对其预期用途、账户/Teamspace 边界和用户范围负责，可自行将 Key 录入上游池。注册默认关闭；管理员只能在运行时前提满足后开启注册：`DEFAULT_UPSTREAM_POOL_ID` 指向的池已启用且至少有一把可调度的 active Key（未被池级限流或熔断），Linux.do OAuth、`GATEWAY_ENCRYPTION_KEY` 与 `GATEWAY_TOKEN_PEPPER` 已配置。无论注册是否开启，网关都遵循上游 `401`/`403`/`429`（含 `Retry-After`），不得以轮换 Key 的方式规避上游限额、套餐配额、封禁或访问控制。
 
 ## 2. 与参考产品的功能映射
 
 | 参考产品能力 | Context7 Gateway 的对应实现 | 首期状态 |
 |---|---|---|
-| 上游 API Key 池 | 管理员增删/启停/验证 Context7 Key；按授权的池/账户范围调度；前端只显示脱敏值 | 必须 |
+| 上游 API Key 池 | 管理员增删/启停/验证 Context7 Key，支持单条与批量导入；按管理员声明的池/账户范围调度；前端只显示脱敏值 | 必须 |
 | 下游访问 Token | 用户创建、一次性复制、撤销/重建 Gateway Key；服务端只存不可逆摘要 | 必须 |
 | MCP 网关 | 代理官方 Context7 MCP；转发 Streamable HTTP/JSON-RPC 及必要的 SSE/session 语义 | 必须 |
 | HTTP API 网关 | 代理官方文档化的 Search、Fetch、Library Search、Context、Usage 等只读接口 | 必须 |
@@ -46,9 +49,9 @@ Context7 官方资料明确区分 API Key、账户/Teamspace 使用量和访问�
 - 远程 MCP 地址为 `https://mcp.context7.com/mcp`。当前 MCP Streamable HTTP 规范版本为 `2026-07-28`，仍需兼容上游/客户端使用的 `2025-11-25` 旧式 initialize/session 流程；实现必须以双方实际支持的版本为准，不得假定所有客户端或 Context7 上游已升级。官方常规工具包括 `resolve-library-id` 与 `query-docs`。其他代码搜索工具属于可选/实验能力，必须以上游当前 `tools/list` 响应为准，不在网关中伪造或固定添加。
 - MCP 网关必须按传输版本透明代理，不重写 JSON-RPC body，不强制注入新版协议元数据。2026-07-28 新式交互使用 POST 与 `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*` 元数据，并可能采用可选 session；2025-11-25 旧式交互使用 `initialize`、`MCP-Session-Id`，并可能使用 GET/SSE/DELETE。转发 `Mcp-*` 未知扩展头、`MCP-Protocol-Version`、`Last-Event-ID` 和服务器协商内容；仅旧式上游 session 需要不透明 ID 重映射和上游 Key 绑定。
 - REST 文档列有 `GET /api/v3/search`、`GET /api/v3/fetch`、`GET /api/v2/libs/search`、`GET /api/v2/context`、`GET /api/v2/usage` 等接口。实现前由契约测试核验请求参数、响应类型和鉴权方式，接口版本应集中配置，避免散落在代码中。
-- Context7 API 使用其 Bearer API Key 鉴权。网关收到用户 Gateway Key 后先完成本地鉴权/配额判断，再选择获准的上游 Key 并构造上游请求；不得把上游 Key 返回给客户端或写入日志。
+- Context7 API 使用其 Bearer API Key 鉴权。网关收到用户 Gateway Key 后先完成本地鉴权/配额判断，再选择管理员声明的可调度上游 Key 并构造上游请求；不得把上游 Key 返回给客户端或写入日志。
 - 正确保留上游 HTTP 状态码、MCP JSON-RPC 错误、限流信息及 `Retry-After` / `RateLimit-*` 等有意义响应头；网关可以补充自己的错误 ID，但不得把上游限额错误伪装成成功。
-- **Key 调度不等于限额绕过**：调度只发生在管理员声明的同一获准池内。若一把 Key 返回 429，先按上游 `Retry-After` 将其限流；不得仅为越过该限额而立刻换另一把 Key。只有运营授权策略明确允许、且池中的其他 Key 属于可独立使用的获准容量时才可继续选取；不满足时向客户端返回明确 429。
+- **Key 调度不等于限额绕过**：调度只发生在管理员声明的同一池边界内。若一把 Key 返回 429，先按上游 `Retry-After` 将其限流；不得仅为越过该限额而立刻换另一把 Key。只有运营者声明的池策略明确允许、且池中的其他 Key 属于可独立使用的容量时才可继续选取；不满足时向客户端返回明确 429。
 - HTTP `fetch` 虽接受目标 URL，网关仍只调用固定的 Context7 官方 API 主机，不允许用户指定上游主机、代理地址、任意路径或任意 Header，防止网关变成开放代理。
 
 ## 4. 技术与运行架构
@@ -67,7 +70,7 @@ MCP/HTTP Client
   -> Gateway Key 鉴权
   -> 用户/Token 状态与本地配额校验
   -> 固定 Context7 路由与操作白名单
-  -> 获准 Key 池调度 + 上游熔断/限流状态
+  -> 管理员声明的 Key 池调度 + 上游熔断/限流状态
   -> Context7 MCP 或 REST 上游
   -> 透传协议结果/状态/限流信息
   -> 异步写入最小化 usage event 与审计元数据
@@ -89,7 +92,7 @@ MCP/HTTP Client
 |---|---|
 | `users` | `id`、OAuth issuer/subject 唯一键、昵称、状态、创建时间、最后登录时间 |
 | `auth_sessions` / `oauth_states` / `admin_passkeys` | 用户与管理员会话分开存储；OAuth state 一次性、短时有效；管理员 Passkey credential ID、公钥材料、计数器和注册时间 |
-| `upstream_pools` | `id`、名称、授权/账务范围标签、调度策略、启用状态；池不可跨越未获准的账户/Teamspace 边界 |
+| `upstream_pools` | `id`、名称、用途/账务范围标签、调度策略、启用状态；池不可混合不同账户/Teamspace 边界 |
 | `upstream_keys` | `id`、`pool_id`、密文、nonce/key version、展示用前缀、状态(`active/disabled/invalid/permission_error/rate_limited`)、最近验证/成功/失败时间、限流截止时间、上次使用时间 |
 | `gateway_tokens` | `id`、`user_id`、摘要、唯一前缀、名称/备注、权限范围、状态、可选过期时间、创建/最后使用/撤销时间 |
 | `mcp_sessions` | 仅旧式上游 session 使用：Gateway session ID 摘要、所属 Token、绑定的上游 Key、加密保存的上游 session ID、过期时间、关闭时间；session 只能被创建它的 Gateway Token 使用。新式 MCP 无上游 session 时不创建记录 |
@@ -127,10 +130,10 @@ MCP/HTTP Client
 
 ### 管理员 API
 
-- `GET/POST /api/admin/pools` 与 `GET/POST /api/admin/pools/:id/keys`：建立授权池、录入/停用/恢复/删除密钥、验证凭证。
+- `GET/POST /api/admin/pools` 与 `GET/POST /api/admin/pools/:id/keys`：建立池、录入/停用/恢复/删除密钥、验证凭证；`POST /api/admin/pools/:id/keys/bulk` 单次最多导入 100 把 Key，路由请求体上限 64 KiB，导入项初始为 `pending`，逐项报告重复/无效且不回显 Key 值或非法 JSON 原文。
 - `GET /api/admin/keys/:id/status`：检查单 Key 上游可用性和可用的官方 usage 信息；所有返回都必须脱敏。
 - `GET /api/admin/users`、`GET/PATCH /api/admin/users/:id`、`PATCH /api/admin/users/:id/quota`：管理用户、状态与本地配额。
-- `GET /api/admin/pools/:pool_id/keys/:id/status` 与 `GET /api/admin/pools/:pool_id/keys/:id/usage`：读取池内单 Key 状态/可用上游用量；仅管理员可访问，usage 响应注明所属授权账户/Teamspace 与抓取时间。
+- `GET /api/admin/pools/:pool_id/keys/:id/status` 与 `GET /api/admin/pools/:pool_id/keys/:id/usage`：读取池内单 Key 状态/可用上游用量；仅管理员可访问，usage 响应注明所属账户/Teamspace 与抓取时间。
 - `GET /api/admin/usage/summary`、`GET /api/admin/logs`：管理员运营汇总和过滤请求事件。
 - `GET/PATCH /api/admin/settings`、`GET/POST /api/admin/announcements`：系统设置、公告及可审计的修改。
 - Phase 6 增加订单/报价/账本的管理员查询，但禁止直接编辑已结算记录；更正通过反向账本事件完成。
@@ -139,10 +142,10 @@ MCP/HTTP Client
 
 ### 上游 Key 池
 
-1. 池是管理员声明的授权/账务边界；每个 Key 只能加入一个有效池。新增时验证格式和连通性，验证失败的 Key 默认不能承载业务请求。
+1. 池是管理员声明的用途/账务边界；每个 Key 只能加入一个有效池。新增时验证格式和连通性，验证失败的 Key 默认不能承载业务请求。新增 Key（包括批量导入）初始为 `pending`，只有验证成功的 Key 才转为 `active` 并承载流量。
 2. 第一版采用**池内最近最少使用优先（LRU）**，再以随机/轮转打破同一时间并列；只有状态为 active、未处于限流/熔断期且账户/池策略允许的 Key 才可选择。
 3. 不跨池自动回退，不把个人计划/Teamspace 不同的 Key 混成同一个无差别池；管理员显式确认池边界及可用策略后才可加入。
-4. `401` 将凭证标为 `invalid` 并停止调度；`403` 标为 `permission_error`，不得将明确的权限/套餐拒绝误判为 Key 失效或切换到另一把 Key 来绕过；`429` 保存 `Retry-After`/限流窗口并遵循上游限制。
+4. `401` 将凭证标为 `invalid` 并停止调度；`403` 标为 `permission_error` 并停用所在池，不得将明确的权限/套餐拒绝误判为 Key 失效或切换到另一把 Key 来绕过；`429` 保存 `Retry-After`/限流窗口并遵循上游限制。
 5. 只有在请求确定未送达上游时才可重新选 Key 或重试连接；任何请求一旦发送到上游，MCP `tools/call` 均不得自动重放。REST 查询也默认不自动重试，除非 Context7 对该操作明确保证幂等且原请求确定未被处理。`5xx` 通过熔断保护后续流量，不以重放当前调用恢复。
 6. 对 `2025-11-25` 旧式传输，若上游返回 `MCP-Session-Id`，网关须为客户端生成不透明 ID，并绑定所属 Gateway Token、原上游 Key 和原上游 session ID；后续 POST、GET/SSE resume 与 DELETE 从此映射选择原 Key。对 `2026-07-28` 新式传输，不合成 initialize/session。对两种版本均须验证每次请求的 Gateway Key、保留协议元数据、透传 SSE/Last-Event-ID 语义，并在客户端断开时取消对应上游流；不得把 SSE 恢复误当作重放一次工具调用。
 
@@ -167,30 +170,30 @@ MCP/HTTP Client
 
 | 阶段 | 当前状态 | 证据 / 未完成事项 |
 |---|---|---|
-| Phase 0 — 上游准入 | **部分完成 / Go-No-Go 未解除** | 官方文档已查阅；2026-11-22 本地成功冒烟覆盖 MCP 新旧协议与四个 REST 读接口；401/403/429/5xx、legacy session 绑定、SSE 恢复和去重计费已由 loopback mock 测试覆盖。运营者须另行记录 Context7 对目标用户范围和 Key 池的授权，并在部署计划上做一次受控负向验证。 |
+| Phase 0 — 运营者声明与上游契约验证 | **声明已完成（DECLARED）；契约验证部分完成（非阻断）** | 运营者声明记录见 [`phase0-operator-record.md`](phase0-operator-record.md)；官方文档已查阅；2026-11-22 本地成功冒烟覆盖 MCP 新旧协议与四个 REST 读接口；401/403/429/5xx、legacy session 绑定、SSE 恢复和去重计费已由 loopback mock 测试覆盖。剩余项是部署计划上的一次受控负向验证与部署观测；这些项非阻断，注册仍受默认池可调度 Key 与 OAuth/加密配置的运行时检查约束。 |
 | Phase 1 — 骨架与持久化 | **实现完成** | Rust/Axum、React/Vite、SQLx SQLite 迁移、健康检查、CI、Compose 和数据库备份/恢复脚本已提供。需在目标部署主机再运行一次镜像构建/恢复演练。 |
-| Phase 2 — 身份与密钥池 | **实现完成；外部 OAuth 配置待部署验证** | Linux.do state+PKCE、浏览器会话、Passkey 管理员及初始/恢复注册码、上游密钥加密、Gateway Key scope/expiry/rotate/revoke 已实现；Passkey 有软件认证器端到端测试。 |
+| Phase 2 — 身份与密钥池 | **实现完成；外部 OAuth 配置待部署验证** | Linux.do state+PKCE、浏览器会话、Passkey 管理员及初始/恢复注册码、上游密钥加密、单条/批量导入（最多 100 条，逐项报告重复/无效且不回显原值）、Gateway Key scope/expiry/rotate/revoke 已实现；Passkey 有软件认证器端到端测试。 |
 | Phase 3 — MCP/REST 代理 | **实现与 mock 验收完成；真实 session 仍待部署观测** | 2026-11-22 经本地 Gateway 的 MCP `tools/list`/两个标准工具和四条 REST 均成功；mock 覆盖 401/403/429/5xx、熔断、session 跨 Token 隔离和 SSE 恢复不重复扣费。上游未下发真实 session，部署后应再观测一次 session 生命周期。 |
 | Phase 4 — 配额与用量 | **实现完成** | 原子预留/结算、并发与边界测试、请求事件、配额汇总、保留期和 60 秒清理已接入。 |
-| Phase 5 — 控制台 | **实现完成** | 中英文用户/管理员界面和设置指南已接入；Playwright 流程 11/11 通过，`npm run build` 通过。 |
+| Phase 5 — 控制台 | **实现完成** | 中英文用户/管理员界面、批量上游 Key 导入和设置指南已接入；Playwright 流程 12/12 通过，`npm run build` 通过。 |
 | Phase 6 — 本地订单/额度 | **本地流程完成；真实支付未纳入** | 本地积分账本、兑换码、签名沙箱订单、反向调账和对账 API/UI 已实现；生产 payment provider 故意禁用，订单额度是 Gateway 本地额度。 |
 | Phase 7 — 发布加固 | **实现与容器验收完成；审计/演练待外部执行** | 非 root、只读 rootfs、cap-drop、no-new-privileges 的生产 Compose 已实测健康；镜像构建成功；SQLite 备份/恢复演练、`npm audit`（生产依赖 0 漏洞）与 Compose 配置检查通过。独立安全评审、生产负载与部署特定恢复演练仍未完成。 |
 
-阶段“实现完成”仅表示本仓库内交付和现有测试达到标记，不等于 Phase 0 授权 Gate 已通过，也不构成生产上线批准。
+阶段“实现完成”仅表示本仓库内交付和现有测试达到标记，不构成生产上线批准；Phase 0 运营者声明也不构成软件对上游合同许可的验证。
 
-### Phase 0 — 产品与上游准入验证（上线阻断 Gate）
+### Phase 0 — 运营者声明与上游契约验证（非阻断）
 
-**目标**：在实现密钥池前先确认授权和上游契约，避免把不允许的密钥共享/限额规避写进产品。
+**目标**：记录运营者对上游 Key 来源、预期用途和用户范围的自担责任声明，并用可复跑检查确认上游契约和错误/限流行为，避免把限额规避写进产品。
 
 **工作项**
-- 记录拟服务用户范围、上游 Key 来源、账户/Teamspace 归属和允许的代理/共享边界；取得可审计的授权依据。
+- 由运营者声明：其自行维护 Context7 API Key，自行决定录入哪些池及服务哪些用户，并对预期用途负责；仓库不核验上游合同许可，也不要求外部审批记录。
 - 在开发环境通过 Context7 官方接口验证：MCP 2026 新式 POST 元数据和 legacy initialize/session 两种传输（tools/list、resolve-library-id、query-docs）、REST Search/Fetch、API Key 鉴权、usage 返回、`401/403/429` 行为与限流头。
 - 记录需要支持的 Context7 官方接口版本、实际配额观察来源和 Key 生命周期；不复制官方 Key UI/账户管理。
 - 确认目标公开域名、TLS/反向代理、部署目标及 OAuth 回调域名。
 
-**交付物**：授权/账户范围登记、经验证的上游契约样例（脱敏）、错误/限流行为表、产品 Go/No-Go 记录。记录模板见 [`phase0-authorization-record.md`](phase0-authorization-record.md)；未签字前保持注册关闭。
+**交付物**：运营者声明记录（[`phase0-operator-record.md`](phase0-operator-record.md)，状态 `DECLARED`）、经验证的上游契约样例（脱敏）、错误/限流行为表。记录不包含原始 Key。
 
-**验收门槛**：关键 MCP 与 REST 操作可重复验证；运营者明确确认密钥池用途和用户授权范围。未通过后者时只允许本地 mock 或单账户试验，不进入开放多用户上线。
+**验收标准**：关键 MCP 与 REST 操作可重复验证；运营者记录已声明；开启注册前，运行时检查通过（默认池存在可调度的 active Key，OAuth 与加密配置就绪）。上述检查不替代上游对 `401`/`403`/`429` 的遵循，也不允许以轮换 Key 规避限额。
 
 ### Phase 1 — 工程骨架、配置与持久化
 
@@ -214,8 +217,8 @@ MCP/HTTP Client
 - 用户：接入 Linux.do Connect OAuth 登录和登出、会话轮换、账户禁用；OAuth 回调校验 state/nonce、过期与重复回调。
 - 管理员：独立 Passkey/WebAuthn 首次注册与恢复流程；确保用户会话不能调用管理员接口。
 - Gateway Key：签发高熵随机 Token、一次展示、摘要校验、命名、撤销、轮换、过期和权限 scope；同一用户可有多把 Key。
-- 上游池：管理员创建授权 Pool、录入 Context7 Key、应用层加密、验证、停用/恢复、删除、状态检查与失败原因；列表/详情仅展示脱敏值。
-- 为 Key 增加显式的授权账户/Teamspace 标签与策略；每个 Key 的归属和加入操作记录审计事件。
+- 上游池：管理员创建 Pool、单条或批量录入 Context7 Key、应用层加密、验证、停用/恢复、删除、状态检查与失败原因；列表/详情仅展示脱敏值。
+- 为 Key 增加显式的账户/Teamspace 标签与策略；每个 Key 的归属和加入操作记录审计事件。
 
 **交付物**：用户/管理员认证、`users`/`gateway_tokens`/`upstream_pools`/`upstream_keys`/审计迁移、管理员 Key 管理 API 与最小操作页。
 
@@ -223,7 +226,7 @@ MCP/HTTP Client
 
 ### Phase 3 — MCP/REST 转发与受控调度
 
-**目标**：实现核心业务闭环：用户凭 Gateway Key 调 Context7，网关安全选择一把获准上游 Key。
+**目标**：实现核心业务闭环：用户凭 Gateway Key 调 Context7，网关安全选择一把管理员声明的可调度上游 Key。
 
 **工作项**
 - MCP `/mcp`：兼容已验证的 MCP 2026 新式 Streamable HTTP 与 legacy 2025-11-25 传输；代理协议元数据、SSE、Last-Event-ID 和 legacy session 标识；原样承载 JSON-RPC body；不缓冲大流式响应到内存。
@@ -234,7 +237,7 @@ MCP/HTTP Client
 
 **交付物**：完整 MCP proxy、只读 REST proxy、上游 Key selection service、合约测试集及命令行 smoke test。
 
-**验收标准**：新式 MCP 客户端可完成请求协商并列工具/调用两个标准工具；legacy 客户端可完成 initialize、列工具与调用；同一 Token 的 REST/MCP 请求均只使用授权池；客户端不能覆写上游地址或 Authorization；SSE/恢复行为不损坏；401/403/429/5xx 的策略正确且无隐式越限 fallback。
+**验收标准**：新式 MCP 客户端可完成请求协商并列工具/调用两个标准工具；legacy 客户端可完成 initialize、列工具与调用；同一 Token 的 REST/MCP 请求均只使用管理员声明的池；客户端不能覆写上游地址或 Authorization；SSE/恢复行为不损坏；401/403/429/5xx 的策略正确且无隐式越限 fallback。
 
 ### Phase 4 — 配额、计量、请求历史与管理员运营 API
 
@@ -294,7 +297,7 @@ MCP/HTTP Client
 
 **交付物**：生产 Docker Compose/部署说明、备份与恢复 SOP、威胁模型、告警面板/日志规范、版本发布与回滚清单。
 
-**验收标准**：从空环境可完成部署并验证健康状态；恢复演练成功；密钥轮换演练可不中断或按预期 fail closed；安全/负载/恢复检查通过；Phase 0 的授权 Gate 仍有效且适用于当前用户范围。
+**验收标准**：从空环境可完成部署并验证健康状态；恢复演练成功；密钥轮换演练可不中断或按预期 fail closed；安全/负载/恢复检查通过；运营者声明记录与当前默认池、用户范围和部署配置保持一致。
 
 ## 9. 全局测试矩阵
 
@@ -310,16 +313,17 @@ MCP/HTTP Client
 - `README.md`：产品用途、功能范围、启动方式、部署入口和链接到专题文档。
 - `docs/IMPLEMENTATION_PLAN.md`：本实施基线。
 - `docs/architecture.md`：组件图、请求/鉴权/调度/数据流、信任边界。
-- `docs/context7-upstream-contract.md`：Phase 0 验证后的接口样例、参数/状态/错误/限流行为，样例全部脱敏。
+- `docs/context7-upstream-contract.md`：上游契约验证样例、参数/状态/错误/限流行为，样例全部脱敏。
 - `docs/security.md`：威胁模型、Key 加密、用户/管理员权限、日志和应急轮换。
 - `docs/deployment.md`：Docker、TLS/代理、环境变量、迁移、备份恢复、升级回滚。
 - `docs/operations.md`：上游池维护、用户/额度管理、限流故障排查、日志/告警和事故处理。
+- `docs/phase0-operator-record.md`：运营者声明、目标池/用户范围与运行时注册前提。
 - `docs/client-setup.md`：各 MCP 客户端和 HTTP API 接入指南。
 - `.env.example`：仅示例变量名与占位符，不得提交真实凭证。
 
 ## 11. 假设与明确暂缓项
 
-- 假设项目目标是由单一运营者面向获准用户提供服务；若 Context7 授权范围限定为组织内网/Teamspace，用户注册必须限制到相应身份/组织。
+- 假设项目目标是由单一运营者面向其声明的用户范围提供服务；若上游条款或运营者策略限定为组织内网/Teamspace，用户注册应限制到相应身份/组织。
 - 上游 Key 池支持多把凭证，但不会自动将不同许可、账户或 Teamspace 混成跨租户共享池。
 - Linux.do Connect 是初始用户登录适配器；如果部署目标不能使用它，应新增 OAuth/OIDC adapter，而不是把 OAuth 逻辑耦合到网关业务代码。
 - 首期仅单节点 SQLite；没有容量与可用性需求前不做 HA、分布式 session 或多节点配额锁。

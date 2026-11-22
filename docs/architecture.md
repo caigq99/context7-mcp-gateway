@@ -7,7 +7,7 @@ MCP / Context7 read-only REST client
   -> Axum request ID + path-only structured tracing
   -> Gateway Key parse/digest/scope/expiry/user-state validation
   -> fixed route/query allowlist + MCP protocol gate
-  -> user-bound authorized pool selection (in-flight-aware LRU)
+  -> user-bound operator-declared pool selection (in-flight-aware LRU)
   -> atomic local rate/quota reservation
   -> short-lived upstream-key lease + decrypt with ChaCha20-Poly1305
   -> fixed Context7 MCP / REST origin (redirects disabled)
@@ -31,7 +31,7 @@ SQLite single-node migrations: accounts, keys, sessions, quota, orders, audit
 
 - REST facade routes map one-to-one to fixed official Context7 origins and strict per-route parameter allowlists. The client cannot provide a host, path, proxy or authorization header.
 - MCP JSON-RPC bodies pass through. New `2026-07-28` header/body metadata is checked; legacy `2025-11-25` initialize, notifications, session IDs, SSE and Last-Event-ID are supported. Only legacy upstream sessions are remapped into opaque Gateway IDs bound to the creating Gateway token and original key.
-- Each accepted request reserves local quota atomically before sending upstream and obtains a key lease. Context7 `401` invalidates a key, `403` pauses the authorized pool for review, `429` cools that pool using Retry-After, and repeated 5xx responses trip a temporary circuit breaker. A request sent to Context7 is never retried onto another key.
+- Each accepted request reserves local quota atomically before sending upstream and obtains a key lease. Context7 `401` invalidates a key, `403` disables the affected pool pending review, `429` cools that pool using Retry-After, and repeated 5xx responses trip a temporary circuit breaker. A request sent to Context7 is never retried onto another key.
 - JSON and SSE response paths settle business units once, distinguish JSON-RPC errors from HTTP success, and allow legacy resumed streams to share one reservation without duplicate business charges. Cancellation, transport failure and lease expiry settle as failures.
 
 ## Storage, quotas and local credit

@@ -15,12 +15,12 @@
 
 Trace spans include only HTTP method and URL path, not query string. Usage records include user/token/pool/key IDs, operation, request ID, response status and duration; raw queries, request bodies, response bodies, cookies and Authorization values are excluded. Keep reverse proxy access logging configured to omit query strings and sensitive headers as well.
 
-## Remaining production/release gates
+## Remaining production/release checks
 
-- The operator must still confirm and record that Context7 permits the intended upstream key pool, sharing pattern and user audience. The software does not infer permission from possession of a key.
+- The operator declares that they maintain the upstream keys and are responsible for their intended use; the repository does not verify upstream contractual permissions. The declaration is recorded in [`phase0-operator-record.md`](phase0-operator-record.md) and is not a blocking software gate. Registration remains closed by default and can be opened only when the configured default pool has an eligible active key and the OAuth, encryption and pepper configuration prerequisites are met.
 - Rebuild the verified image on the deployment host and repeat backup/restore against the operator-controlled production volume.
 - Exercise the upstream `401`, `403`, `429`, `5xx`, key revocation and retry behavior with a controlled/mock upstream, and test legacy MCP session resume separately; current live smoke coverage proves the successful REST and standard MCP tool flows only.
-- Key sharing and pool operation must be limited to Context7-authorized account/Teamspace and users. Never rotate keys to evade upstream rate limits or access controls. Confirm authorization for the intended audience before opening a shared service.
+- Key sharing and pool operation are the operator's declared responsibility within the account/Teamspace and user scope they intend. Never rotate keys to evade upstream rate limits or access controls. Upstream `401` marks a key invalid, `403` marks the key `permission_error` and disables its pool pending review, and `429` cools the pool using `Retry-After`; these responses must never be bypassed by selecting another key.
 - This build has not had an independent security review. Deploy behind TLS, restrict administrative network access, rotate secrets only through a planned migration, keep payment disabled unless an approved provider is implemented, and never place real credentials in source, logs, tests or screenshots.
 
 ## Incident response basics

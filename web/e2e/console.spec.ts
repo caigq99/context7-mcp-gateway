@@ -163,6 +163,49 @@ test('admin can inspect pool usage and disable an upstream key', async ({ page }
   await expect.poll(() => statusBody).toEqual({ status: 'disabled' });
 });
 
+test('admin bulk imports upstream keys without echoing raw values', async ({ page }) => {
+  const keys = ['ctx7sk-alpha', 'ctx7sk-beta', 'ctx7sk-gamma'];
+  let method = '';
+  let payload: unknown = null;
+  await page.route('**/api/admin/pools/pool-1/keys/bulk', async (route) => {
+    method = route.request().method();
+    payload = route.request().postDataJSON();
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      created: 1,
+      duplicates: 1,
+      invalid: 1,
+      results: [
+        { index: 0, status: 'created', key_id: 'key-a', display_prefix: 'ctx7_ab…' },
+        { index: 1, status: 'duplicate' },
+        { index: 2, status: 'invalid' },
+      ],
+    }) });
+  });
+  await page.goto('/admin/pools/pool-1');
+  await page.getByRole('button', { name: 'Bulk import' }).click();
+  const dialog = page.getByRole('dialog');
+  const input = dialog.getByLabel('Context7 API keys');
+  const originalInput = `  ${keys[0]}  \n\n${keys[1]}\n${keys[2]}\n`;
+  await input.fill(originalInput);
+  await dialog.getByRole('button', { name: 'Import keys' }).click();
+  await expect.poll(() => method).toBe('POST');
+  await expect.poll(() => payload).toEqual({ api_keys: keys });
+  const summary = dialog.locator('.success-notice');
+  await expect(summary).toContainText('Created 1 · Duplicates 1 · Invalid 1');
+  for (const key of keys) await expect(summary).not.toContainText(key);
+  await expect(input).toHaveValue(originalInput);
+  const lineResults = dialog.getByRole('list', { name: 'Line results' });
+  await expect(lineResults.getByRole('listitem')).toHaveCount(3);
+  await expect(lineResults).toContainText('#1');
+  await expect(lineResults).toContainText('Created');
+  await expect(lineResults).toContainText('Duplicate');
+  await expect(lineResults).toContainText('Invalid');
+  const close = dialog.getByRole('button', { name: 'Close', exact: true }).last();
+  await expect(close).toBeVisible();
+  await close.click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
 test('admin edits quota with an optimistic plan version', async ({ page }) => {
   let change: Record<string, unknown> | null = null;
   await page.route('**/api/admin/users/user-1/quota', async (route) => {

@@ -87,6 +87,22 @@ export type UpstreamKey = {
   last_used_at: string | null;
 };
 
+export type BulkKeyImportStatus = 'created' | 'duplicate' | 'invalid';
+
+export type BulkKeyImportResult = {
+  index: number;
+  status: BulkKeyImportStatus;
+  key_id?: string;
+  display_prefix?: string;
+};
+
+export type BulkKeyImportResponse = {
+  created: number;
+  duplicates: number;
+  invalid: number;
+  results: BulkKeyImportResult[];
+};
+
 export type KeyUsage = {
   fetched_at: string;
   authorization_scope: string;
