@@ -18,9 +18,37 @@ Phase 0 is an operator declaration plus upstream contract verification, recorded
 
 ## Run locally
 
+For a single-process preview that also supports administrator Passkeys, build the frontend once and serve it from the Rust process:
+
 ```sh
-# Terminal 1: configure separate development secrets and start the API
-export GATEWAY_ADMIN_TOKEN="replace-with-a-random-secret-of-at-least-32-characters"
+cd web
+npm ci
+npm run build
+cd ..
+
+export APP_ENV=development
+export PUBLIC_ORIGIN="http://localhost:8787"
+export GATEWAY_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export GATEWAY_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+export GATEWAY_TOKEN_PEPPER="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+cargo run --locked -p context7-gateway
+```
+
+Open `http://localhost:8787/console` and `http://localhost:8787/admin/login`. Use the literal hostname `localhost`, not `127.0.0.1`, when testing Passkeys. Issue the one-time administrator enrollment code in another terminal with the same `APP_ENV`, `PUBLIC_ORIGIN`, and `DATABASE_PATH`:
+
+```sh
+cargo run --locked -p context7-gateway -- admin issue-enrollment
+```
+
+Keep `GATEWAY_ENCRYPTION_KEY` and `GATEWAY_TOKEN_PEPPER` stable across restarts; changing either value makes previously stored upstream Keys or Gateway Keys unusable.
+
+For frontend hot reload, run the API with the Vite origin and then start Vite:
+
+```sh
+# Terminal 1
+export APP_ENV=development
+export PUBLIC_ORIGIN="http://localhost:5173"
+export GATEWAY_ADMIN_TOKEN="$(openssl rand -hex 32)"
 export GATEWAY_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 export GATEWAY_TOKEN_PEPPER="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 cargo run --locked -p context7-gateway
@@ -31,7 +59,7 @@ npm ci
 npm run dev
 ```
 
-The API listens on `127.0.0.1:8787`; Vite listens on `127.0.0.1:5173` and proxies API/health/MCP paths to the backend. Database and static paths can be changed with environment variables. Use `.env.example` as a reference; do not store real secrets in the repository. For the administrator browser console, use the one-time enrollment command in [`docs/admin-auth.md`](docs/admin-auth.md), then sign in with a Passkey at `/admin/login`. `GATEWAY_ADMIN_TOKEN` is accepted only for non-production API/bootstrap development; production startup rejects it. Configure Linux.do OAuth, the upstream pool, production secrets, and TLS separately as described in [`docs/deployment.md`](docs/deployment.md).
+The API listens on `127.0.0.1:8787`; Vite listens on `127.0.0.1:5173` and proxies API/health/MCP paths to the backend. Open `http://localhost:5173`. Database and static paths can be changed with environment variables. Use `.env.example` as a reference; do not store real secrets in the repository. For the administrator browser console, use the one-time enrollment command in [`docs/admin-auth.md`](docs/admin-auth.md), then sign in with a Passkey at `/admin/login`. `GATEWAY_ADMIN_TOKEN` is accepted only for non-production API/bootstrap development; production startup rejects it. Configure Linux.do OAuth, the upstream pool, production secrets, and TLS separately as described in [`docs/deployment.md`](docs/deployment.md).
 
 ## Checks
 
