@@ -174,7 +174,7 @@ MCP/HTTP Client
 | Phase 4 — 配额与用量 | **实现完成** | 原子预留/结算、并发与边界测试、请求事件、配额汇总、保留期和 60 秒清理已接入。 |
 | Phase 5 — 控制台 | **实现完成** | 中英文用户/管理员界面和设置指南已接入；Playwright 流程 11/11 通过，`npm run build` 通过。 |
 | Phase 6 — 本地订单/额度 | **本地流程完成；真实支付未纳入** | 本地积分账本、兑换码、签名沙箱订单、反向调账和对账 API/UI 已实现；生产 payment provider 故意禁用，订单额度是 Gateway 本地额度。 |
-| Phase 7 — 发布加固 | **部分完成** | 非 root、只读容器、Compose、Passkey-only 生产配置、依赖审计/SBOM 与 SQLite 备份恢复脚本已实现；`docker compose config` 与脚本演练通过。镜像构建因 registry 下载停滞未得到成功结果，独立安全评审、负载和生产恢复演练仍未完成。 |
+| Phase 7 — 发布加固 | **实现与容器验收完成；审计/演练待外部执行** | 非 root、只读 rootfs、cap-drop、no-new-privileges 的生产 Compose 已实测健康；镜像构建成功；SQLite 备份/恢复演练、`npm audit`（生产依赖 0 漏洞）与 Compose 配置检查通过。独立安全评审、生产负载与部署特定恢复演练仍未完成。 |
 
 阶段“实现完成”仅表示本仓库内交付和现有测试达到标记，不等于 Phase 0 授权 Gate 已通过，也不构成生产上线批准。
 
@@ -188,7 +188,7 @@ MCP/HTTP Client
 - 记录需要支持的 Context7 官方接口版本、实际配额观察来源和 Key 生命周期；不复制官方 Key UI/账户管理。
 - 确认目标公开域名、TLS/反向代理、部署目标及 OAuth 回调域名。
 
-**交付物**：授权/账户范围登记、经验证的上游契约样例（脱敏）、错误/限流行为表、产品 Go/No-Go 记录。
+**交付物**：授权/账户范围登记、经验证的上游契约样例（脱敏）、错误/限流行为表、产品 Go/No-Go 记录。记录模板见 [`phase0-authorization-record.md`](phase0-authorization-record.md)；未签字前保持注册关闭。
 
 **验收门槛**：关键 MCP 与 REST 操作可重复验证；运营者明确确认密钥池用途和用户授权范围。未通过后者时只允许本地 mock 或单账户试验，不进入开放多用户上线。
 

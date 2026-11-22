@@ -38,6 +38,8 @@ curl --fail --silent https://gateway.example.com/health/ready
 
 镜像构建采用 `cargo build --release --locked`。服务默认以 UID/GID `10001`、read-only root filesystem、仅数据库卷可写、丢弃 Linux capabilities 与 `no-new-privileges` 运行。Host 端口默认只映射 `127.0.0.1:8787`，建议使用宿主机上的 TLS 反向代理作为唯一公开入口。反向代理需限制请求体、设置合理超时（MCP/SSE 请求可能较长）、只转发真实 Host/HTTPS scheme，并保护管理控制台。若把 Gateway 与代理放在隔离容器网络，改为不发布 Host 端口并通过共享受限 Docker network 接入，而不要在互联网接口上直接发布无 TLS 的 `8787`。
 
+本仓库基线已在 2026-11-22 完成一次镜像构建与生产模式 Compose 冒烟：`/health/ready` 返回 ready，数据库卷由 UID 10001 写入，容器保持只读 rootfs、cap-drop ALL 和 `no-new-privileges`。这只是构建基线证据；每次发布仍应在目标主机重新构建并执行下述备份、恢复和告警检查。
+
 要更改端口：`GATEWAY_HOST_BIND=127.0.0.1` 仅配置绑定地址；Compose 宿主机端口可通过 `.env` 中的 `GATEWAY_HOST_PORT` 修改（默认 `8787`）。将 `GATEWAY_HOST_BIND` 改为 `0.0.0.0` 会暴露明文端口到全部网络接口，除非网络 ACL 已限制访问，否则不要这样做。
 
 ## 引导首个管理员与上游池

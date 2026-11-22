@@ -43,3 +43,5 @@ Local redemptions, orders and credit ledger represent only Gateway units. The op
 ## Deployment boundary
 
 The supported target is one Rust/Axum process backed by one persistent SQLite volume, behind a TLS-terminating reverse proxy. Do not run multiple replicas against the same SQLite file or publish the container's plain HTTP port to an untrusted network. Back up the database with the documented SQLite online backup scripts and separately preserve the exact encryption key and token pepper.
+
+For development and tests, `CONTEXT7_MCP_ORIGIN` / `CONTEXT7_REST_ORIGIN` may point the fixed upstream client at a loopback Context7 stand-in. Production rejects non-empty overrides and always contacts the documented origins. This switch is configuration-only; callers still cannot supply a host, path or proxy.

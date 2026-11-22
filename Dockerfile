@@ -13,7 +13,7 @@ COPY crates/gateway/src crates/gateway/src
 COPY crates/gateway/migrations crates/gateway/migrations
 RUN cargo build --release --locked -p context7-gateway
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl sqlite3 \
     && rm -rf /var/lib/apt/lists/* \

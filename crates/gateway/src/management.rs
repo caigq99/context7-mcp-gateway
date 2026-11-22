@@ -203,7 +203,6 @@ pub struct GatewayTokenSummary {
     pub last_used_at: Option<String>,
     pub expires_at: Option<String>,
     pub scopes: Vec<GatewayTokenScope>,
-    pub quota_units_this_month: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -215,7 +214,6 @@ pub struct CreatedGatewayToken {
     created_at: String,
     expires_at: Option<String>,
     scopes: Vec<GatewayTokenScope>,
-    quota_units_this_month: Option<i64>,
 }
 
 pub async fn create_pool(
@@ -604,8 +602,8 @@ pub async fn list_gateway_tokens(
     headers: HeaderMap,
 ) -> Result<Json<Vec<GatewayTokenSummary>>, ApiError> {
     authorize_admin(&state, &headers).await?;
-    let records = sqlx::query_as::<_, (String, String, String, String, String, Option<String>, Option<String>, String, i64)>(
-        "SELECT t.id, t.prefix, t.name, CASE WHEN t.status = 'active' AND unixepoch(t.expires_at) <= unixepoch() THEN 'expired' ELSE t.status END, t.created_at, t.last_used_at, t.expires_at, t.scopes_json, (SELECT COALESCE(SUM(e.success_units), 0) FROM usage_events e WHERE e.gateway_token_id = t.id AND e.started_unix >= unixepoch('now','start of month')) FROM gateway_tokens t WHERE t.user_id = ? ORDER BY t.created_at DESC",
+    let records = sqlx::query_as::<_, (String, String, String, String, String, Option<String>, Option<String>, String)>(
+        "SELECT t.id, t.prefix, t.name, CASE WHEN t.status = 'active' AND unixepoch(t.expires_at) <= unixepoch() THEN 'expired' ELSE t.status END, t.created_at, t.last_used_at, t.expires_at, t.scopes_json FROM gateway_tokens t WHERE t.user_id = ? ORDER BY t.created_at DESC",
     )
     .bind(user_id)
     .fetch_all(&state.pool)
@@ -821,7 +819,6 @@ impl
         Option<String>,
         Option<String>,
         String,
-        i64,
     )> for GatewayTokenSummary
 {
     fn from(
@@ -834,7 +831,6 @@ impl
             Option<String>,
             Option<String>,
             String,
-            i64,
         ),
     ) -> Self {
         Self {
@@ -846,7 +842,6 @@ impl
             last_used_at: row.5,
             expires_at: row.6,
             scopes: serde_json::from_str(&row.7).unwrap_or_default(),
-            quota_units_this_month: Some(row.8),
         }
     }
 }
@@ -882,7 +877,6 @@ async fn insert_gateway_token(
         expires_at: record.2,
         scopes: serde_json::from_str(scopes)
             .map_err(|_| ApiError::new(ApiErrorCode::InternalError))?,
-        quota_units_this_month: None,
     })
 }
 

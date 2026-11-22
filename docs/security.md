@@ -18,7 +18,7 @@ Trace spans include only HTTP method and URL path, not query string. Usage recor
 ## Remaining production/release gates
 
 - The operator must still confirm and record that Context7 permits the intended upstream key pool, sharing pattern and user audience. The software does not infer permission from possession of a key.
-- Run the Docker image build in the deployment environment and verify backup/restore against an operator-controlled production-like volume.
+- Rebuild the verified image on the deployment host and repeat backup/restore against the operator-controlled production volume.
 - Exercise the upstream `401`, `403`, `429`, `5xx`, key revocation and retry behavior with a controlled/mock upstream, and test legacy MCP session resume separately; current live smoke coverage proves the successful REST and standard MCP tool flows only.
 - Key sharing and pool operation must be limited to Context7-authorized account/Teamspace and users. Never rotate keys to evade upstream rate limits or access controls. Confirm authorization for the intended audience before opening a shared service.
 - This build has not had an independent security review. Deploy behind TLS, restrict administrative network access, rotate secrets only through a planned migration, keep payment disabled unless an approved provider is implemented, and never place real credentials in source, logs, tests or screenshots.

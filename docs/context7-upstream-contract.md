@@ -31,7 +31,7 @@ The code treats upstream `401` as an invalid key, `403` as a permission error th
 - Collect operator documentation that the upstream account/Teamspace permits the intended user population and proxy sharing.
 - Session deletion and abrupt live disconnect behavior should still be observed once against the real service; the mock covers resume, cross-token isolation and no duplicate charge.
 - Validate any deployment-specific plan limits, billing/teamspace observations and client compatibility before opening registration.
-- The Docker image build is not yet verified because the image registry download stalled in this environment.
+- The Docker image and production-like Compose sandbox were verified on 2026-11-22 (health/readiness, non-root, read-only rootfs, writable database volume). Rebuild and re-run the deployment-specific checks on the target host.
 
 ## Public source references
 

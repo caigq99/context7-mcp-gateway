@@ -6,7 +6,7 @@ Context7 MCP Gateway is a self-hostable, Rust-based gateway for Context7. The op
 
 The first end-to-end implementation is in place: Context7 MCP and four read-only REST proxies; encrypted operator-maintained upstream keys; Gateway Key scopes, expiry, rotation and revocation; Linux.do OAuth/PKCE user sessions; Passkey-only production administration; atomic local quota accounting and request history; user/admin consoles; client setup guides; announcements; and local quota-credit, redemption and sandbox order flows. See the phase status and remaining verification gates in [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
-**This is not an authorization approval or an automatic production go-live.** Before sharing an upstream pool with other users, confirm in writing that the maintained Context7 account/Teamspace and the intended audience are permitted. The repository intentionally disables production payment providers and account registration by default; production operators must configure a valid default pool and explicitly open registration after review. A Docker image build and an independent security review remain release gates.
+**This is not an authorization approval or an automatic production go-live.** Before sharing an upstream pool with other users, confirm in writing that the maintained Context7 account/Teamspace and the intended audience are permitted. The repository intentionally disables production payment providers and account registration by default; production operators must configure a valid default pool and explicitly open registration after review. The image build and a hardened Compose smoke are verified in this workspace; an independent security review and deployment-specific drills remain release gates.
 
 The Phase 0 authorization gate in the plan must be satisfied before operating a shared upstream pool for external users. Keys must be used within the permitted account/Teamspace and user scope; key rotation must not be used to evade upstream limits.
 
@@ -52,5 +52,6 @@ cd web && npm ci && npm run build
 - [`docs/operations.md`](docs/operations.md): current bootstrap workflows and planned operator procedures.
 - [`docs/client-setup.md`](docs/client-setup.md): Gateway Key, MCP and REST usage.
 - [`docs/context7-upstream-contract.md`](docs/context7-upstream-contract.md): observed API/MCP contracts and remaining untested error cases.
+- [`docs/phase0-authorization-record.md`](docs/phase0-authorization-record.md): operator sign-off template for the release-blocking upstream authorization gate.
 - [`docs/admin-auth.md`](docs/admin-auth.md): Passkey onboarding/recovery.
 - [`docs/quota-and-billing.md`](docs/quota-and-billing.md): quota, usage, credits, redemptions and disabled payment sandbox.

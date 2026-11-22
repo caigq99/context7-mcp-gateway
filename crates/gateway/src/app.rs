@@ -184,7 +184,8 @@ async fn security_headers(
     request: Request,
     next: Next,
 ) -> Response {
-    let api_route = request.uri().path().starts_with("/api/");
+    let api_route =
+        request.uri().path().starts_with("/api/") || request.uri().path().starts_with("/auth/");
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         "content-security-policy",
