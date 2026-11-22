@@ -1,0 +1,44 @@
+name: context7-gateway
+services:
+  context7-gateway:
+    image: context7-gateway:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "${GATEWAY_HOST_BIND:-127.0.0.1}:${GATEWAY_HOST_PORT:-8787}:8787"
+    environment:
+      APP_ENV: production
+      GATEWAY_BIND: 0.0.0.0:8787
+      DATABASE_PATH: /srv/gateway/data/context7_gateway.sqlite3
+      WEB_DIST_DIR: /srv/gateway/web/dist
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}
+      GATEWAY_ENCRYPTION_KEY: ${GATEWAY_ENCRYPTION_KEY:?set GATEWAY_ENCRYPTION_KEY}
+      GATEWAY_TOKEN_PEPPER: ${GATEWAY_TOKEN_PEPPER:?set GATEWAY_TOKEN_PEPPER}
+      GATEWAY_EVENT_RETENTION_DAYS: ${GATEWAY_EVENT_RETENTION_DAYS:-30}
+      DEFAULT_UPSTREAM_POOL_ID: ${DEFAULT_UPSTREAM_POOL_ID:?set DEFAULT_UPSTREAM_POOL_ID}
+      LINUXDO_OAUTH_ENABLED: ${LINUXDO_OAUTH_ENABLED:-true}
+      LINUXDO_OAUTH_CLIENT_ID: ${LINUXDO_OAUTH_CLIENT_ID:?set LINUXDO_OAUTH_CLIENT_ID}
+      LINUXDO_OAUTH_CLIENT_SECRET: ${LINUXDO_OAUTH_CLIENT_SECRET:?set LINUXDO_OAUTH_CLIENT_SECRET}
+      LINUXDO_OAUTH_REDIRECT_URL: ${LINUXDO_OAUTH_REDIRECT_URL:?set LINUXDO_OAUTH_REDIRECT_URL}
+      LINUXDO_OAUTH_SCOPE: ${LINUXDO_OAUTH_SCOPE:-openid profile}
+    volumes:
+      - context7_gateway_data:/srv/gateway/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  context7_gateway_data:

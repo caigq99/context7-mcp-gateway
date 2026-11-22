@@ -1,0 +1,11 @@
+/target/
+/web/node_modules/
+/web/dist/
+/web/test-results/
+/web/playwright-report/
+/web/*.tsbuildinfo
+/data/
+.DS_Store
+.env
+.env.*
+!.env.example
