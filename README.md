@@ -77,6 +77,7 @@ cd web && npm ci && npm run build
 - [`docs/architecture.md`](docs/architecture.md): component boundaries and request flow.
 - [`docs/security.md`](docs/security.md): secrets, auth boundaries, threat model, and logging defaults.
 - [`docs/deployment.md`](docs/deployment.md): local/container deployment and secret/backup handling.
+- [`docs/linuxdo-oauth.md`](docs/linuxdo-oauth.md): Linux.do Connect application, callback, environment, registration gate and troubleshooting.
 - [`docs/operations.md`](docs/operations.md): current bootstrap workflows and planned operator procedures.
 - [`docs/client-setup.md`](docs/client-setup.md): Gateway Key, MCP and REST usage.
 - [`docs/context7-upstream-contract.md`](docs/context7-upstream-contract.md): observed API/MCP contracts and remaining untested error cases.
