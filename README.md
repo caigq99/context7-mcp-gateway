@@ -86,7 +86,7 @@ cd web && npm ci && npm run build
 
 ## Container image
 
-Pushes to `main` and version tags build the combined frontend/backend image for `linux/amd64` and `linux/arm64`, then publish it to GitHub Container Registry:
+Pushes to `main` and version tags build the combined frontend/backend `linux/amd64` image and publish it to GitHub Container Registry. Manual runs can opt into `linux/amd64,linux/arm64`, but the ARM64 Rust build is substantially slower under QEMU:
 
 ```sh
 docker pull ghcr.io/caigq99/context7-mcp-gateway:latest
