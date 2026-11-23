@@ -84,6 +84,16 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cd web && npm ci && npm run build
 ```
 
+## Container image
+
+Pushes to `main` and version tags build the combined frontend/backend image for `linux/amd64` and `linux/arm64`, then publish it to GitHub Container Registry:
+
+```sh
+docker pull ghcr.io/caigq99/context7-mcp-gateway:latest
+```
+
+Branch, tag and `sha-*` tags are published by [`.github/workflows/container.yml`](.github/workflows/container.yml).
+
 ## Docs
 
 - [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md): phase-by-phase scope, architecture decisions, interfaces, and acceptance criteria.
