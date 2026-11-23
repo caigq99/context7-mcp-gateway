@@ -9,7 +9,7 @@ import { ErrorNotice, Loading, useMutation, useResource } from './components';
 import { useLanguage } from './i18n';
 import type { Locale, Text } from './i18n';
 import { Link, NavigationProvider, useNavigation } from './navigation';
-import { TokenPage } from './token-page';
+import { InitialTokenNotice, TokenPage } from './token-page';
 import { BillingPage } from './billing-page';
 import { Dashboard, RequestPage } from './usage-pages';
 import { SetupPage } from './setup-page';
@@ -145,6 +145,7 @@ function Application() {
             <button role="menuitem" type="button" onClick={() => { setUserMenuOpen(false); void signOut.run(signOutAction); }}><LogOut size={15} />{t('signOut')}</button></div>}
         </header>
         <div className="page-content">
+          {!admin && <InitialTokenNotice />}
           <ErrorNotice error={signOut.error} />
           {notFound ? <section className="page-heading"><h1 id="page-title">{t('unknownRoute')}</h1><Link className="button button-primary" href={admin ? '/admin/dashboard' : '/console/dashboard'}><ArrowLeft size={16} aria-hidden="true" />{t('home')}</Link></section>
             : <RoutePage admin={admin} base={base} resource={resource} />}

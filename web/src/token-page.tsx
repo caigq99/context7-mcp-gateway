@@ -1,5 +1,5 @@
 import { KeyRound, Plus, RefreshCw } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from './api';
 import type { GatewayToken } from './api';
 import { Confirm, CopyBlock, Dialog, EmptyState, ErrorNotice, PageHeading, Panel, Resource, StatusChip, Time, useMutation, useResource } from './components';
@@ -9,19 +9,45 @@ import { Link } from './navigation';
 type TokenAction = { type: 'create' } | { type: 'rotate' | 'revoke' | 'details'; token: GatewayToken }
   | { type: 'reveal'; token: string };
 
+type InitialToken = { token: string; name: string };
+
+export function InitialTokenNotice() {
+  const { t } = useLanguage();
+  const [issued, setIssued] = useState<InitialToken | null>(null);
+  useEffect(() => {
+    let active = true;
+    void api<InitialToken | undefined>('/api/user/initial-token')
+      .then((token) => { if (active && token) setIssued(token); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+  if (!issued) return null;
+  const acknowledge = () => {
+    void api<void>('/api/user/initial-token/acknowledge', { method: 'POST' })
+      .finally(() => setIssued(null));
+  };
+  return <Dialog title={t('initialKeyTitle')} onClose={acknowledge}>
+    <p>{t('initialKeyHelp')}</p>
+    <CopyBlock text={issued.token} label={t('key')} />
+    <div className="actions modal-actions">
+      <button type="button" className="button button-primary" onClick={acknowledge}>{t('initialKeySaved')}</button>
+    </div>
+  </Dialog>;
+}
+
 export function TokenPage({ detailId }: { detailId?: string }) {
   const { t } = useLanguage();
   return (
     <>
       <PageHeading title="tokens" help="tokensHelp" actions={detailId && <Link className="button" href="/console/tokens">{t('backToTokens')}</Link>} />
       <Panel title={t('tokens')}>
-        <TokenManager path="/api/user/tokens" detailId={detailId} selfService />
+        <TokenManager path="/api/user/tokens" detailId={detailId} selfService readOnly />
       </Panel>
     </>
   );
 }
 
-export function TokenManager({ path, detailId, selfService = false, disabled = false }: { path: string; detailId?: string; selfService?: boolean; disabled?: boolean }) {
+export function TokenManager({ path, detailId, selfService = false, readOnly = false, disabled = false }: { path: string; detailId?: string; selfService?: boolean; readOnly?: boolean; disabled?: boolean }) {
   const { t } = useLanguage();
   const tokens = useResource<GatewayToken[]>(path);
   const [action, setAction] = useState<TokenAction | null>(null);
@@ -43,13 +69,13 @@ export function TokenManager({ path, detailId, selfService = false, disabled = f
           <button type="button" className="button button-quiet icon-button" onClick={tokens.refresh} aria-label={t('refresh')}>
             <RefreshCw size={16} aria-hidden="true" />
           </button>
-          <button type="button" className="button button-primary" disabled={disabled} onClick={() => setAction({ type: 'create' })}>
+          {!readOnly && <button type="button" className="button button-primary" disabled={disabled} onClick={() => setAction({ type: 'create' })}>
             <Plus size={17} aria-hidden="true" />{t('createKey')}
-          </button>
+          </button>}
         </div>
       </div>
       <Resource source={tokens}>{(rows) => rows.length === 0
-        ? <EmptyState title="tokenEmpty" hint="tokenEmptyHelp" icon={<KeyRound size={22} />} />
+        ? <EmptyState title="tokenEmpty" hint={readOnly ? 'tokenReadOnlyEmptyHelp' : 'tokenEmptyHelp'} icon={<KeyRound size={22} />} />
         : <div className="table-scroll">
             <table className="data-table">
               <thead><tr>
@@ -64,7 +90,7 @@ export function TokenManager({ path, detailId, selfService = false, disabled = f
                   <td><Time value={token.last_used_at} /></td><td><Time value={token.created_at} /></td>
                   <td><div className="actions row-actions">
                     {details(token)}
-                    {status !== 'revoked' && status !== 'expired' && <>
+                    {!readOnly && status !== 'revoked' && status !== 'expired' && <>
                       {selfService && <button type="button" className="button button-sm" onClick={() => setAction({ type: 'rotate', token })}>{t('rotate')}</button>}
                       <button type="button" className="button button-sm button-text-danger" onClick={() => setAction({ type: 'revoke', token })}>{t('revoke')}</button>
                     </>}

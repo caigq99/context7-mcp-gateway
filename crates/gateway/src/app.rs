@@ -98,15 +98,12 @@ pub fn router(config: Config, pool: SqlitePool, http: reqwest::Client) -> Router
     let browser_routes = Router::new()
         .route("/api/user/me", get(oauth::me))
         .route("/api/user/logout", post(oauth::logout))
+        .route("/api/user/tokens", get(oauth::list_tokens))
+        .route("/api/user/initial-token", get(oauth::initial_token))
         .route(
-            "/api/user/tokens",
-            get(oauth::list_tokens).post(oauth::create_token),
+            "/api/user/initial-token/acknowledge",
+            post(oauth::acknowledge_initial_token),
         )
-        .route(
-            "/api/user/tokens/{token_id}/rotate",
-            post(oauth::rotate_token),
-        )
-        .route("/api/user/tokens/{token_id}", delete(oauth::revoke_token))
         .route(
             "/api/user/service-status",
             get(operations::user_service_status),

@@ -32,7 +32,7 @@ Context7 官方资料区分 API Key、账户/Teamspace 使用量和访问权限�
 | 参考产品能力 | Context7 Gateway 的对应实现 | 首期状态 |
 |---|---|---|
 | 上游 API Key 池 | 管理员增删/启停/验证 Context7 Key，支持单条与批量导入；按管理员声明的池/账户范围调度；前端只显示脱敏值 | 必须 |
-| 下游访问 Token | 用户创建、一次性复制、撤销/重建 Gateway Key；服务端只存不可逆摘要 | 必须 |
+| 下游访问 Token | 管理员签发和管理 Gateway Key；新用户注册成功时后端自动签发一把并在首次进入控制台时一次性展示，用户端只读；服务端只存不可逆摘要 | 必须 |
 | MCP 网关 | 代理官方 Context7 MCP；转发 Streamable HTTP/JSON-RPC 及必要的 SSE/session 语义 | 必须 |
 | HTTP API 网关 | 代理官方文档化的 Search、Fetch、Library Search、Context、Usage 等只读接口 | 必须 |
 | 使用量/配额 | 用户本地配额、使用统计；管理员配置计划与额度；上游用量另行展示 | 必须 |
@@ -124,7 +124,7 @@ MCP/HTTP Client
 ### 用户控制台 API
 
 - `GET /api/user/me`：当前账户、状态及本地计划摘要。
-- `GET/POST /api/user/tokens`、`POST /api/user/tokens/:id/rotate`、`DELETE /api/user/tokens/:id`：自助签发、一次性展示、轮换及撤销用户 Token。
+- `GET /api/user/tokens`：用户只读查看自己的 Token 摘要；用户端不提供创建、轮换或撤销。注册回调自动签发首个 Gateway Key，`GET /api/user/initial-token` 通过短期 HttpOnly Cookie 一次性交付，`POST /api/user/initial-token/acknowledge` 清除交付 Cookie。管理员继续通过 `/api/admin/users/:id/tokens` 创建和撤销。
 - `GET /api/user/usage/summary`、`GET /api/user/usage/events`：本地用量聚合与分页请求记录。
 - `GET /api/user/service-status`：网关整体可用性与用户自身 Token 状态；不得泄露池内 Key 数量、Key Hint、其他用户或 Teamspace usage。
 - `GET /api/user/setup-guides`：返回基于部署公开 Origin、客户端、选中 Gateway Token 前缀生成的接入片段；Token 值用环境变量占位符表示。
@@ -175,7 +175,7 @@ MCP/HTTP Client
 |---|---|---|
 | Phase 0 — 运营者声明与上游契约验证 | **声明已完成（DECLARED）；契约验证部分完成（非阻断）** | 运营者声明记录见 [`phase0-operator-record.md`](phase0-operator-record.md)；官方文档已查阅；2026-11-22 本地成功冒烟覆盖 MCP 新旧协议与四个 REST 读接口；401/403/429/5xx、legacy session 绑定、SSE 恢复和去重计费已由 loopback mock 测试覆盖。剩余项是部署计划上的一次受控负向验证与部署观测；这些项非阻断，注册仍受默认池可调度 Key 与 OAuth/加密配置的运行时检查约束。 |
 | Phase 1 — 骨架与持久化 | **实现完成** | Rust/Axum、React/Vite、SQLx SQLite 迁移、健康检查、CI、Compose 和数据库备份/恢复脚本已提供。需在目标部署主机再运行一次镜像构建/恢复演练。 |
-| Phase 2 — 身份与密钥池 | **实现完成；外部 OAuth 配置待部署验证** | Linux.do state+PKCE、浏览器会话、管理员密码登录（启动时 Argon2id 内存哈希、失败限流、会话版本失效）、可选 Passkey 绑定与密码保持可用的登录规则、passkey-only 的 CLI 初始/恢复注册码、上游密钥加密、单条/批量导入（最多 100 条，逐项报告重复/无效且不回显原值）、Gateway Key scope/expiry/rotate/revoke 已实现；Passkey 有软件认证器端到端测试，密码/可选 Passkey 引导仍需目标部署实测。 |
+| Phase 2 — 身份与密钥池 | **实现完成；外部 OAuth 配置待部署验证** | Linux.do state+PKCE、浏览器会话、管理员密码登录（启动时 Argon2id 内存哈希、失败限流、会话版本失效）、可选 Passkey 绑定与密码保持可用的登录规则、passkey-only 的 CLI 初始/恢复注册码、上游密钥加密、单条/批量导入、注册成功自动签发 Gateway Key 并通过短期 Cookie 一次性交付、用户 Token 只读、管理员签发/撤销已实现；Passkey 有软件认证器端到端测试，密码/可选 Passkey 引导仍需目标部署实测。 |
 | Phase 3 — MCP/REST 代理 | **实现与 mock 验收完成；真实 session 仍待部署观测** | 2026-11-22 经本地 Gateway 的 MCP `tools/list`/两个标准工具和四条 REST 均成功；mock 覆盖 401/403/429/5xx、熔断、session 跨 Token 隔离和 SSE 恢复不重复扣费。上游未下发真实 session，部署后应再观测一次 session 生命周期。 |
 | Phase 4 — 配额与用量 | **实现完成** | 原子预留/结算、并发与边界测试、请求事件、配额汇总、保留期和 60 秒清理已接入。 |
 | Phase 5 — 控制台 | **实现完成** | 中英文用户/管理员界面、批量上游 Key 导入和设置指南已接入；Playwright 流程 16/16 通过（含密码默认登录、可选 Passkey 与虚拟 WebAuthn 认证器注册），`npm run build` 通过。 |
@@ -262,7 +262,7 @@ MCP/HTTP Client
 **目标**：交付与 Hikari 同类的完整日常操作体验。
 
 **工作项**
-- 用户控制台：账户概览、当前套餐/剩余额度、小时/日/月用量图表、Gateway Key 创建/复制/撤销、Token 活跃状态、请求历史与错误详情。
+- 用户控制台：账户概览、当前套餐/剩余额度、小时/日/月用量图表、注册自动签发 Gateway Key 的一次性复制、Token 活跃状态只读展示、请求历史与错误详情。
 - 使用方法页：选中客户端后生成 MCP/HTTP 配置步骤、可复制代码、环境变量配置方式、连接验证和排错提示；展示的是 Gateway Origin 与 Gateway Token，不包含 Context7 上游 Key。
 - 管理员控制台：系统健康、上游 Pool/Key CRUD 与状态、用户查询/禁用、配额调整、用量/请求日志过滤、公告和系统设置。
 - 为窄屏实现可操作布局；空状态、加载、权限拒绝、部分上游不可用、无可用 Key、额度耗尽均有明确状态。

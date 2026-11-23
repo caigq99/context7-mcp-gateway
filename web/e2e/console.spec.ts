@@ -38,8 +38,9 @@ test.beforeEach(async ({ page }) => {
     const method = request.method();
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     if (path === '/api/user/me') return json({ user });
-    if (path === '/api/user/tokens' && method === 'POST') return json({ ...baseToken, id: 'token-2', name: 'New client', token: 'c7gw_one_time_secret' }, 201);
     if (path === '/api/user/tokens' || path === '/api/admin/users/user-1/tokens') return json([baseToken]);
+    if (path === '/api/user/initial-token' && method === 'GET') return route.fulfill({ status: 204 });
+    if (path === '/api/user/initial-token/acknowledge' && method === 'POST') return route.fulfill({ status: 204 });
     if (path === '/api/user/usage/summary') return json({ plan, windows: {
       requests_5m: { used: 4, limit: 30, reserved: 0, resets_at: '2026-11-21T10:05:00Z' },
       business_1h: { used: 9, limit: 50, reserved: 0, resets_at: '2026-11-21T11:00:00Z' },
@@ -240,16 +241,34 @@ test('overview renders real quota status, usage and request activity', async ({ 
   await expect(page.getByText('Maintenance')).toBeVisible();
 });
 
-test('new Gateway key appears once and can be copied', async ({ page, context }) => {
+test('registration-issued API key is revealed once and acknowledged', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
-  await page.goto('/console/tokens');
-  await page.getByRole('button', { name: 'Create API key' }).click();
-  await page.getByLabel('API key name').fill('New client');
-  await page.getByRole('button', { name: 'Create', exact: true }).click();
-  await expect(page.getByRole('dialog')).toContainText('c7gw_one_time_secret');
+  let acknowledged = false;
+  await page.route('**/api/user/initial-token', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ token: 'c7g_autoissued_one_time_secret', name: 'Initial API key' }),
+  }));
+  await page.route('**/api/user/initial-token/acknowledge', async (route) => {
+    acknowledged = true;
+    await route.fulfill({ status: 204 });
+  });
+  await page.goto('/console/dashboard');
+  await expect(page.getByRole('dialog')).toContainText('c7g_autoissued_one_time_secret');
   await page.getByRole('dialog').getByRole('button', { name: 'Copy' }).click();
   await expect(page.getByRole('dialog')).toContainText('Copied');
-  await expect(page.getByRole('dialog')).toContainText('shown only here');
+  await page.getByRole('dialog').getByRole('button', { name: 'I saved the key' }).click();
+  await expect.poll(() => acknowledged).toBe(true);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('user token page is read-only', async ({ page }) => {
+  await page.goto('/console/tokens');
+  await expect(page.getByText('c7gw_abc…')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Create API key' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Rotate' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Revoke' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Details' })).toBeVisible();
 });
 
 test('REST and MCP client templates use the deployment origin and a placeholder', async ({ page }) => {
@@ -284,18 +303,6 @@ test('request history applies operation, result and UTC date filters', async ({ 
   await expect.poll(() => observedSearch).toContain('from=1795219200');
   await expect(observedSearch).toContain('operation=mcp_tools_call');
   await expect(observedSearch).toContain('status=success');
-});
-
-test('quota errors are readable on Gateway API requests', async ({ page }) => {
-  await page.route('**/api/user/tokens', async (route) => {
-    if (route.request().method() === 'GET') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([baseToken]) });
-    return route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify({ error: 'quota_exceeded' }) });
-  });
-  await page.goto('/console/tokens');
-  await page.getByRole('button', { name: 'Create API key' }).click();
-  await page.getByLabel('API key name').fill('Quota test');
-  await page.getByRole('button', { name: 'Create', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('exceeded the gateway’s local quota');
 });
 
 test('admin can inspect pool usage and disable an upstream key', async ({ page }) => {

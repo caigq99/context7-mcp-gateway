@@ -13,17 +13,20 @@ use zeroize::Zeroizing;
 
 use crate::{
     config::LinuxDoOAuthConfig,
-    credentials::issue_gateway_token,
+    credentials::{issue_gateway_token, parse_gateway_token, verify_gateway_token},
     management::{
         ApiError, ApiErrorCode, AppState, GatewayTokenScope, encode_scopes, map_database_error,
+        write_audit,
     },
     session,
 };
 
 const OAUTH_STATE_TTL_SECONDS: i64 = 600;
 const USER_SESSION_TTL_SECONDS: i64 = 14 * 24 * 60 * 60;
+const INITIAL_TOKEN_TTL_SECONDS: i64 = 5 * 60;
 const OAUTH_STATE_COOKIE: &str = "c7g_oauth_state";
 const USER_SESSION_COOKIE: &str = "c7g_session";
+const INITIAL_TOKEN_COOKIE: &str = "c7g_initial_token";
 
 #[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
@@ -157,7 +160,7 @@ pub async fn callback(
     let verifier = pkce_verifier(&state, state_value)?;
     let access_token = exchange_code(&state.http, oauth, authorization_code, &verifier).await?;
     let profile = fetch_profile(&state.http, oauth, &access_token).await?;
-    let user = upsert_user(&state, oauth, &profile).await?;
+    let (user, initial_token) = upsert_user(&state, oauth, &profile).await?;
     let session_token = random_url_token(32)?;
     let session_digest = session::token_digest(&session_token, state.config.token_pepper)
         .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
@@ -190,6 +193,14 @@ pub async fn callback(
         header::SET_COOKIE,
         expire_cookie(&state, OAUTH_STATE_COOKIE)?,
     );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        if let Some(token) = initial_token {
+            initial_token_cookie(&state, token.as_str(), INITIAL_TOKEN_TTL_SECONDS)?
+        } else {
+            expire_initial_token_cookie(&state)?
+        },
+    );
     Ok(response)
 }
 
@@ -206,6 +217,9 @@ pub async fn logout(
         header::SET_COOKIE,
         expire_cookie(&state, user_cookie_name(&state))?,
     );
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, expire_initial_token_cookie(&state)?);
     Ok(response)
 }
 
@@ -244,6 +258,65 @@ pub async fn list_tokens(
             })
             .collect(),
     ))
+}
+
+#[derive(Serialize)]
+pub struct InitialGatewayToken {
+    token: String,
+    name: String,
+}
+
+pub async fn initial_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let user = authenticate_browser_session(&state, &headers).await?;
+    let cookie_name = initial_token_cookie_name(&state);
+    let Some(raw_token) = cookie_value(&headers, cookie_name) else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+    let invalid = || {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        if let Ok(cookie) = expire_initial_token_cookie(&state) {
+            response.headers_mut().append(header::SET_COOKIE, cookie);
+        }
+        response
+    };
+    let Ok(token_id) = parse_gateway_token(raw_token) else {
+        return Ok(invalid());
+    };
+    let record = sqlx::query_as::<_, (Vec<u8>, String, String)>(
+        "SELECT token_digest, user_id, name FROM gateway_tokens \
+         WHERE id = ? AND status = 'active' \
+         AND (expires_at IS NULL OR unixepoch(expires_at) > unixepoch())",
+    )
+    .bind(&token_id.0)
+    .fetch_optional(&state.pool)
+    .await;
+    let record = match record {
+        Ok(Some(record)) => record,
+        _ => return Ok(invalid()),
+    };
+    let verified =
+        verify_gateway_token(raw_token, &record.0, state.config.token_pepper).unwrap_or(false);
+    if record.1 != user.id || !verified {
+        return Ok(invalid());
+    }
+    Ok(Json(InitialGatewayToken {
+        token: raw_token.to_owned(),
+        name: record.2,
+    })
+    .into_response())
+}
+
+pub async fn acknowledge_initial_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    authenticate_browser_session(&state, &headers).await?;
+    let mut response_headers = HeaderMap::new();
+    response_headers.append(header::SET_COOKIE, expire_initial_token_cookie(&state)?);
+    Ok((StatusCode::NO_CONTENT, response_headers))
 }
 
 pub async fn create_token(
@@ -465,7 +538,7 @@ async fn upsert_user(
     state: &AppState,
     config: &LinuxDoOAuthConfig,
     profile: &UpstreamUserProfile,
-) -> Result<UserProfile, ApiError> {
+) -> Result<(UserProfile, Option<Zeroizing<String>>), ApiError> {
     if profile.active == Some(false) || profile.silenced == Some(true) {
         return Err(ApiError::new(ApiErrorCode::Forbidden));
     }
@@ -487,13 +560,18 @@ async fn upsert_user(
         .chars()
         .take(120)
         .collect::<String>();
+    let mut transaction = state
+        .pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(map_database_error)?;
     let row = sqlx::query_as::<_, (String, String, String)>(
         "UPDATE users SET display_name = ?, last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE oauth_issuer = ? AND oauth_subject = ? AND status = 'active' RETURNING id, display_name, status",
     )
     .bind(&display_name)
     .bind(&issuer)
     .bind(&subject)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(crate::management::map_database_error)?;
     let row = if let Some(row) = row {
@@ -512,16 +590,63 @@ async fn upsert_user(
         .bind(issuer)
         .bind(subject)
         .bind(&state.config.default_upstream_pool_id)
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(crate::management::map_database_error)?
         .ok_or_else(|| ApiError::new(ApiErrorCode::RegistrationClosed))?
     };
-    Ok(UserProfile {
-        id: row.0,
-        display_name: row.1,
-        status: row.2,
-    })
+    let initial_token = ensure_initial_gateway_token(state, &mut transaction, &row.0).await?;
+    transaction.commit().await.map_err(map_database_error)?;
+    Ok((
+        UserProfile {
+            id: row.0,
+            display_name: row.1,
+            status: row.2,
+        },
+        initial_token,
+    ))
+}
+
+async fn ensure_initial_gateway_token(
+    state: &AppState,
+    connection: &mut sqlx::SqliteConnection,
+    user_id: &str,
+) -> Result<Option<Zeroizing<String>>, ApiError> {
+    let has_token = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM gateway_tokens WHERE user_id = ?)",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(map_database_error)?;
+    if has_token != 0 {
+        return Ok(None);
+    }
+    let issued = issue_gateway_token(state.config.token_pepper)
+        .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
+    let scopes = encode_scopes(None)?;
+    sqlx::query(
+        "INSERT INTO gateway_tokens(id, user_id, token_digest, prefix, name, scopes_json) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&issued.id.0)
+    .bind(user_id)
+    .bind(issued.digest.to_vec())
+    .bind(&issued.prefix)
+    .bind("Initial API key")
+    .bind(scopes)
+    .execute(&mut *connection)
+    .await
+    .map_err(map_database_error)?;
+    write_audit(
+        &mut *connection,
+        "oauth-auto-provision",
+        "gateway_token.auto_issue",
+        "gateway_token",
+        &issued.id.0,
+    )
+    .await?;
+    Ok(Some(Zeroizing::new(issued.raw_token)))
 }
 
 pub(crate) fn expiry_modifier(days: Option<u16>) -> Result<Option<String>, ApiError> {
@@ -608,6 +733,31 @@ fn expire_cookie(state: &AppState, name: &str) -> Result<HeaderValue, ApiError> 
     cookie_header(state, name, "", 0)
 }
 
+fn initial_token_cookie_name(_state: &AppState) -> &'static str {
+    INITIAL_TOKEN_COOKIE
+}
+
+fn initial_token_cookie(
+    state: &AppState,
+    value: &str,
+    max_age: i64,
+) -> Result<HeaderValue, ApiError> {
+    let secure = if state.config.public_origin.scheme() == "https" {
+        "; Secure"
+    } else {
+        ""
+    };
+    HeaderValue::from_str(&format!(
+        "{}={value}; Path=/api/user/initial-token; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}",
+        initial_token_cookie_name(state)
+    ))
+    .map_err(|_| ApiError::new(ApiErrorCode::InternalError))
+}
+
+fn expire_initial_token_cookie(state: &AppState) -> Result<HeaderValue, ApiError> {
+    initial_token_cookie(state, "", 0)
+}
+
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     left.len() == right.len() && bool::from(left.ct_eq(right))
@@ -640,12 +790,13 @@ mod tests {
         routing::{get, post},
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
 
     use super::{
-        CallbackQuery, CreateTokenRequest, CurrentSession, callback, create_token, list_tokens,
-        login, logout, me, rotate_token,
+        CallbackQuery, CurrentSession, acknowledge_initial_token, callback, initial_token,
+        list_tokens, login, logout, me,
     };
     use crate::{
         config::{Config, Environment, LinuxDoOAuthConfig},
@@ -821,6 +972,33 @@ mod tests {
             .expect("new user session cookie exists")
     }
 
+    fn initial_token_cookie(response: &axum::response::Response) -> String {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(|header| {
+                let value = header
+                    .to_str()
+                    .ok()?
+                    .strip_prefix("c7g_initial_token=")?
+                    .split(';')
+                    .next()?;
+                (!value.is_empty()).then(|| value.to_owned())
+            })
+            .expect("initial API key cookie exists")
+    }
+
+    async fn body_json(response: axum::response::Response) -> Value {
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body reads")
+            .to_bytes();
+        serde_json::from_slice(&body).expect("response contains JSON")
+    }
+
     #[tokio::test]
     async fn oauth_state_pkce_registration_gate_session_rotation_and_logout_work() {
         let expected_challenge = Arc::new(Mutex::new(None));
@@ -862,37 +1040,55 @@ mod tests {
         let CurrentSession { user } = current.0;
         assert_eq!(user.display_name, "Mock User");
         assert_eq!(user.status, "active");
+        let initial_token_value = initial_token_cookie(&first_response);
+        assert!(initial_token_value.starts_with("c7g_"));
 
         let mut cookie_headers = HeaderMap::new();
         cookie_headers.insert(
             header::COOKIE,
             HeaderValue::from_str(&format!("c7g_session={first_session}")).expect("session cookie"),
         );
-        let (status, Json(created)) = create_token(
-            State(state.clone()),
-            cookie_headers.clone(),
-            Json(CreateTokenRequest {
-                name: "laptop".to_owned(),
-                expires_in_days: Some(30),
-                scopes: Some(vec![GatewayTokenScope::Mcp]),
-            }),
-        )
-        .await
-        .expect("MCP-only Gateway token is created");
-        assert_eq!(status, StatusCode::CREATED);
-        let raw_token = created.token.clone().expect("raw token is returned once");
-        assert!(raw_token.starts_with("c7g_"));
-        assert_eq!(created.scopes, vec![GatewayTokenScope::Mcp]);
-        assert!(created.expires_at.is_some());
         let listed = list_tokens(State(state.clone()), cookie_headers.clone())
             .await
             .expect("tokens list")
             .0;
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].scopes, vec![GatewayTokenScope::Mcp]);
+        assert_eq!(listed[0].name, "Initial API key");
+        assert_eq!(
+            listed[0].scopes,
+            vec![GatewayTokenScope::Mcp, GatewayTokenScope::ContextRead]
+        );
         assert!(
             listed[0].token.is_none(),
             "list must not return the raw secret"
+        );
+        let initial_headers = HeaderMap::from_iter([(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "c7g_session={first_session}; c7g_initial_token={initial_token_value}"
+            ))
+            .expect("initial token cookie header"),
+        )]);
+        let issued = initial_token(State(state.clone()), initial_headers.clone())
+            .await
+            .expect("initial API key can be retrieved");
+        assert_eq!(issued.status(), StatusCode::OK);
+        let issued = body_json(issued).await;
+        assert_eq!(issued["token"], initial_token_value);
+        assert_eq!(issued["name"], "Initial API key");
+        let acknowledged = acknowledge_initial_token(State(state.clone()), initial_headers)
+            .await
+            .expect("initial API key acknowledgement succeeds");
+        assert_eq!(acknowledged.0, StatusCode::NO_CONTENT);
+        assert!(
+            acknowledged
+                .1
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(
+                    |value| value.starts_with("c7g_initial_token=;") && value.contains("Max-Age=0")
+                )
         );
         let bearer = |token: &str| {
             let mut headers = HeaderMap::new();
@@ -903,54 +1099,22 @@ mod tests {
             headers
         };
         assert!(
-            authenticate_gateway_token(&bearer(&raw_token), &state, GatewayTokenScope::Mcp)
-                .await
-                .is_ok()
-        );
-        let forbidden =
-            authenticate_gateway_token(&bearer(&raw_token), &state, GatewayTokenScope::ContextRead)
-                .await
-                .expect_err("MCP-only scope cannot use the REST facade");
-        assert_eq!(forbidden.into_response().status(), StatusCode::FORBIDDEN);
-        let invalid_expiry = create_token(
-            State(state.clone()),
-            cookie_headers.clone(),
-            Json(CreateTokenRequest {
-                name: "bad-expiry".to_owned(),
-                expires_in_days: Some(0),
-                scopes: None,
-            }),
-        )
-        .await
-        .err()
-        .expect("zero-day expiry is rejected");
-        assert_eq!(
-            invalid_expiry.into_response().status(),
-            StatusCode::BAD_REQUEST
-        );
-        let (status, Json(rotated)) = rotate_token(
-            State(state.clone()),
-            cookie_headers.clone(),
-            axum::extract::Path(created.id.clone()),
-        )
-        .await
-        .expect("token rotates");
-        assert_eq!(status, StatusCode::CREATED);
-        let rotated_token = rotated.token.clone().expect("rotated raw token");
-        assert_ne!(rotated_token, raw_token);
-        assert_eq!(rotated.scopes, vec![GatewayTokenScope::Mcp]);
-        assert_eq!(
-            authenticate_gateway_token(&bearer(&raw_token), &state, GatewayTokenScope::Mcp)
-                .await
-                .expect_err("old token is revoked")
-                .into_response()
-                .status(),
-            StatusCode::UNAUTHORIZED
+            authenticate_gateway_token(
+                &bearer(&initial_token_value),
+                &state,
+                GatewayTokenScope::Mcp
+            )
+            .await
+            .is_ok()
         );
         assert!(
-            authenticate_gateway_token(&bearer(&rotated_token), &state, GatewayTokenScope::Mcp)
-                .await
-                .is_ok()
+            authenticate_gateway_token(
+                &bearer(&initial_token_value),
+                &state,
+                GatewayTokenScope::ContextRead
+            )
+            .await
+            .is_ok()
         );
 
         sqlx::query("UPDATE gateway_settings SET registration_open = 0 WHERE id = 1")
