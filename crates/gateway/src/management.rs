@@ -228,6 +228,7 @@ pub struct UserSummary {
     pub created_at: String,
     pub last_login_at: Option<String>,
     pub upstream_pool_id: Option<String>,
+    pub trust_level: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -637,8 +638,8 @@ pub async fn create_user(
         return Err(ApiError::new(ApiErrorCode::NotFound));
     }
     let id = Uuid::new_v4().simple().to_string();
-    let record = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>)>(
-        "INSERT INTO users(id, display_name, upstream_pool_id, oauth_issuer, oauth_subject) VALUES (?, ?, ?, ?, ?) RETURNING id, display_name, status, created_at, last_login_at, upstream_pool_id",
+    let record = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>, Option<i64>)>(
+        "INSERT INTO users(id, display_name, upstream_pool_id, oauth_issuer, oauth_subject) VALUES (?, ?, ?, ?, ?) RETURNING id, display_name, status, created_at, last_login_at, upstream_pool_id, trust_level",
     )
     .bind(&id)
     .bind(display_name)
@@ -657,8 +658,8 @@ pub async fn list_users(
     headers: HeaderMap,
 ) -> Result<Json<Vec<UserSummary>>, ApiError> {
     authorize_admin(&state, &headers).await?;
-    let records = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>)>(
-        "SELECT id, display_name, status, created_at, last_login_at, upstream_pool_id FROM users ORDER BY created_at DESC",
+    let records = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>, Option<i64>)>(
+        "SELECT id, display_name, status, created_at, last_login_at, upstream_pool_id, trust_level FROM users ORDER BY created_at DESC",
     )
     .fetch_all(&state.pool)
     .await
@@ -938,19 +939,6 @@ impl
     }
 }
 
-impl From<(String, String, String, String, Option<String>)> for UserSummary {
-    fn from(row: (String, String, String, String, Option<String>)) -> Self {
-        Self {
-            id: row.0,
-            display_name: row.1,
-            status: row.2,
-            created_at: row.3,
-            last_login_at: row.4,
-            upstream_pool_id: None,
-        }
-    }
-}
-
 impl
     From<(
         String,
@@ -959,6 +947,7 @@ impl
         String,
         Option<String>,
         Option<String>,
+        Option<i64>,
     )> for UserSummary
 {
     fn from(
@@ -969,6 +958,7 @@ impl
             String,
             Option<String>,
             Option<String>,
+            Option<i64>,
         ),
     ) -> Self {
         Self {
@@ -978,6 +968,7 @@ impl
             created_at: row.3,
             last_login_at: row.4,
             upstream_pool_id: row.5,
+            trust_level: row.6,
         }
     }
 }

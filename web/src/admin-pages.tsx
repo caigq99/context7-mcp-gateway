@@ -360,6 +360,7 @@ function UserDetails({ user, pools, refresh }: { user: AdminUser; pools: PoolSou
       <dl className="definition-list">
         <div><dt>{t('userId')}</dt><dd><code>{user.id}</code></dd></div><div><dt>{t('created')}</dt><dd><Time value={user.created_at} /></dd></div>
         <div><dt>{t('lastLogin')}</dt><dd><Time value={user.last_login_at} /></dd></div>
+        <div><dt>{t('linuxdoTrustLevel')}</dt><dd>{user.trust_level == null ? '—' : `L${user.trust_level}`}</dd></div>
       </dl>
       <Resource source={pools}>{(items) => <form className="inline-form" onSubmit={(event) => {
         event.preventDefault();

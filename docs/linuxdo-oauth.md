@@ -97,9 +97,24 @@ Gateway -> connect.linux.do 授权页 -> /auth/linuxdo/callback -> /console/dash
 - 使用授权码换取 access token。
 - 读取 `/api/user`，拒绝 `active=false` 或 `silenced=true` 的账户。
 - 按 Linux.do 用户 ID 和 userinfo origin 绑定本地用户。
+- 保存合法的 `trust_level`（0–4）；新用户按下表自动获得初始配额。
 - 创建短期登录会话并设置 HttpOnly Cookie。
 
-## 6. 常见错误
+## 6. Linux.do 等级配额
+
+新注册用户会根据 userinfo 中的 `trust_level` 创建第一版 `user_quota_assignments`：
+
+| 等级 | 每 5 分钟请求 | 每小时业务调用 | 每日积分 | 每月积分 |
+| --- | ---: | ---: | ---: | ---: |
+| L0 | 10 | 30 | 10 | 50 |
+| L1 | 30 | 60 | 20 | 300 |
+| L2 | 60 | 240 | 70 | 1,000 |
+| L3 | 120 | 600 | 200 | 3,000 |
+| L4 | 180 | 900 | 400 | 6,000 |
+
+后续登录发现等级变化时，只在当前计划仍等于旧等级默认值（且未配置操作权重）时自动切换；管理员手工改过的配额保持不变。`trust_level` 缺失或不在 `0..=4` 时不会创建默认计划，也不会清除已有等级或配额。
+
+## 7. 常见错误
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
@@ -110,7 +125,7 @@ Gateway -> connect.linux.do 授权页 -> /auth/linuxdo/callback -> /console/dash
 | 从 `localhost` 换成 `127.0.0.1` 后用户登录失败 | OAuth state/Cookie 使用了不同 Origin | 保持使用同一个 Origin；管理员 Passkey（如已绑定）也受 WebAuthn Origin 约束 |
 | 修改域名后老用户无法匹配 | 用户绑定使用 issuer + subject | 保留原 userinfo origin，或执行明确的数据迁移 |
 
-## 7. 生产检查清单
+## 8. 生产检查清单
 
 - Linux.do 应用回调地址与 `PUBLIC_ORIGIN` 完全一致。
 - TLS 终止在可信反向代理，转发真实 Host 和 HTTPS scheme。

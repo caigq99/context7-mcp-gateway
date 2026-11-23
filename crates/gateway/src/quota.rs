@@ -15,7 +15,9 @@ use crate::{
 };
 
 mod api;
+mod tiers;
 pub use api::{admin_routes, user_routes};
+pub(crate) use tiers::apply_linuxdo_tier_quota;
 
 const RATE_WINDOW_SECONDS: i64 = 300;
 const LEASE_SECONDS: i64 = 300;

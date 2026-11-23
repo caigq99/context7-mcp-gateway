@@ -47,6 +47,7 @@ export type AdminUser = User & {
   upstream_pool_id: string | null;
   last_login_at: string | null;
   created_at: string;
+  trust_level: number | null;
 };
 
 export type GatewayToken = {

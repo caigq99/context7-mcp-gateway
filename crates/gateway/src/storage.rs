@@ -96,7 +96,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("migration metadata exists");
-        assert_eq!(row.get::<String, _>("value"), "10");
+        assert_eq!(row.get::<String, _>("value"), "11");
         pool.close().await;
     }
 

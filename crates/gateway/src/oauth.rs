@@ -21,7 +21,7 @@ use crate::{
         ApiError, ApiErrorCode, AppState, GatewayTokenScope, encode_scopes, map_database_error,
         write_audit,
     },
-    session,
+    quota, session,
 };
 
 const OAUTH_STATE_TTL_SECONDS: i64 = 600;
@@ -520,6 +520,7 @@ struct UpstreamUserProfile {
     sub: Option<String>,
     username: Option<String>,
     name: Option<String>,
+    trust_level: Option<i64>,
     active: Option<bool>,
     silenced: Option<bool>,
 }
@@ -607,41 +608,56 @@ async fn upsert_user(
         .chars()
         .take(120)
         .collect::<String>();
+    let trust_level = profile.trust_level.filter(|level| (0..=4).contains(level));
     let mut transaction = state
         .pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(map_database_error)?;
-    let row = sqlx::query_as::<_, (String, String, String)>(
-        "UPDATE users SET display_name = ?, last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE oauth_issuer = ? AND oauth_subject = ? AND status = 'active' RETURNING id, display_name, status",
+    let existing = sqlx::query_as::<_, (String, Option<i64>)>(
+        "SELECT id, trust_level FROM users WHERE oauth_issuer = ? AND oauth_subject = ? AND status = 'active'",
     )
-    .bind(&display_name)
     .bind(&issuer)
     .bind(&subject)
     .fetch_optional(&mut *transaction)
     .await
     .map_err(crate::management::map_database_error)?;
-    let row = if let Some(row) = row {
-        row
+    let previous_trust_level = existing.as_ref().and_then(|row| row.1);
+    let row = if let Some((id, _)) = existing {
+        sqlx::query_as::<_, (String, String, String, Option<i64>)>(
+            "UPDATE users SET display_name = ?, last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+             trust_level = COALESCE(?, trust_level), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ? AND status = 'active' RETURNING id, display_name, status, trust_level",
+        )
+        .bind(&display_name)
+        .bind(trust_level)
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(crate::management::map_database_error)?
+        .ok_or_else(|| ApiError::new(ApiErrorCode::Unauthorized))?
     } else {
-        sqlx::query_as::<_, (String, String, String)>(
-            "INSERT INTO users(id, display_name, oauth_issuer, oauth_subject, upstream_pool_id, last_login_at)
-             SELECT ?, ?, ?, ?, p.id, strftime('%Y-%m-%dT%H:%M:%fZ', 'now') FROM upstream_pools p, gateway_settings s
+        sqlx::query_as::<_, (String, String, String, Option<i64>)>(
+            "INSERT INTO users(id, display_name, oauth_issuer, oauth_subject, upstream_pool_id, last_login_at, trust_level)
+             SELECT ?, ?, ?, ?, p.id, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ? FROM upstream_pools p, gateway_settings s
              WHERE p.id = ? AND p.enabled = 1 AND s.id = 1 AND s.registration_open = 1
              ON CONFLICT(oauth_issuer, oauth_subject) DO UPDATE SET display_name = excluded.display_name,
-             last_login_at = excluded.last_login_at, updated_at = excluded.last_login_at WHERE users.status = 'active'
-             RETURNING id, display_name, status",
+             last_login_at = excluded.last_login_at, trust_level = COALESCE(excluded.trust_level, users.trust_level),
+             updated_at = excluded.last_login_at WHERE users.status = 'active'
+             RETURNING id, display_name, status, trust_level",
         )
         .bind(Uuid::new_v4().simple().to_string())
-        .bind(display_name)
+        .bind(&display_name)
         .bind(issuer)
         .bind(subject)
+        .bind(trust_level)
         .bind(&state.config.default_upstream_pool_id)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(crate::management::map_database_error)?
         .ok_or_else(|| ApiError::new(ApiErrorCode::RegistrationClosed))?
     };
+    quota::apply_linuxdo_tier_quota(&mut transaction, &row.0, row.3, previous_trust_level).await?;
     let initial_token = ensure_initial_gateway_token(state, &mut transaction, &row.0).await?;
     transaction.commit().await.map_err(map_database_error)?;
     Ok((
@@ -884,7 +900,7 @@ mod tests {
 
     async fn userinfo_endpoint() -> Json<Value> {
         Json(
-            json!({"sub":"linuxdo-subject-1","username":"mock-user","name":"Mock User","active":true}),
+            json!({"sub":"linuxdo-subject-1","username":"mock-user","name":"Mock User","trust_level":2,"active":true}),
         )
     }
 
@@ -1094,6 +1110,15 @@ mod tests {
         let CurrentSession { user } = current.0;
         assert_eq!(user.display_name, "Mock User");
         assert_eq!(user.status, "active");
+        let quota = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT requests_per_five_minutes, business_calls_per_hour, daily_units, monthly_units \
+             FROM user_quota_assignments WHERE user_id = ?",
+        )
+        .bind(&user.id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("Linux.do trust level quota is assigned");
+        assert_eq!(quota, (60, 240, 70, 1_000));
         let initial_token_value = initial_token_cookie(&first_response);
         assert!(initial_token_value.starts_with("c7g_"));
 

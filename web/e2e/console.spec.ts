@@ -60,7 +60,7 @@ test.beforeEach(async ({ page }) => {
     if (path === '/api/admin/pools' && method === 'GET') return json([pool]);
     if (path === '/api/admin/pools/pool-1/keys') return json([upstreamKey]);
     if (path === '/api/admin/pools/pool-1/keys/upstream-1/usage') return json({ authorization_scope: pool.authorization_scope, fetched_at: '2026-11-21T10:00:00Z', status: 'available', upstream_status: 200, usage: { requests_today: 41 } });
-    if (path === '/api/admin/users') return json([{ ...user, upstream_pool_id: 'pool-1', created_at: '2026-11-20T00:00:00Z', last_login_at: null }]);
+    if (path === '/api/admin/users') return json([{ ...user, upstream_pool_id: 'pool-1', created_at: '2026-11-20T00:00:00Z', last_login_at: null, trust_level: 2 }]);
     if (path === '/api/admin/users/user-1/quota' && method === 'GET') return json({ plan, windows: {
       requests_5m: { used: 4, limit: 30, reserved: 0, resets_at: null },
       business_1h: { used: 9, limit: 50, reserved: 0, resets_at: null },
