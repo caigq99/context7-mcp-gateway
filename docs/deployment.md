@@ -28,6 +28,8 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 
 不要在生产配置设置 `GATEWAY_ADMIN_TOKEN`；程序拒绝非空生产 Bearer token。管理员默认使用 `.env` 中的用户名/密码登录；Passkey 是登录后可选绑定的第二凭证，密码登录不会因绑定 Passkey 而停用。passkey-only 兼容模式、CLI 初始注册与恢复流程见 [`admin-auth.md`](admin-auth.md)。
 
+如果部署主机必须通过 HTTP 代理访问 Linux.do/Context7，为 Gateway 进程设置标准的 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`，并用 `NO_PROXY=localhost,127.0.0.1,::1` 排除本机回环。浏览器能访问 Linux.do 并不代表后端进程自动继承了系统代理配置。
+
 ## Compose 启动
 
 ```sh

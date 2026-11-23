@@ -42,6 +42,15 @@ Open `http://localhost:8787/console` and `http://localhost:8787/admin/login`. Si
 
 Keep `GATEWAY_ENCRYPTION_KEY` and `GATEWAY_TOKEN_PEPPER` stable across restarts; changing either value makes previously stored upstream Keys or Gateway Keys unusable.
 
+If the host reaches Linux.do or Context7 through an HTTP proxy, export standard proxy variables before starting the Rust process; the browser may use the macOS system proxy while the backend does not. For example:
+
+```sh
+export HTTPS_PROXY="http://127.0.0.1:10808"
+export HTTP_PROXY="$HTTPS_PROXY"
+export ALL_PROXY="$HTTPS_PROXY"
+export NO_PROXY="localhost,127.0.0.1,::1"
+```
+
 For frontend hot reload while keeping the browser origin stable for OAuth and Passkeys, run the API on `8788` and put Vite on `8787`:
 
 ```sh
