@@ -37,6 +37,7 @@ pub struct ApiError {
 #[serde(rename_all = "snake_case")]
 pub enum ApiErrorCode {
     Unauthorized,
+    InvalidAdminCredentials,
     InvalidGatewayKey,
     TokenDisabled,
     RegistrationClosed,
@@ -75,6 +76,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.error {
             ApiErrorCode::Unauthorized
+            | ApiErrorCode::InvalidAdminCredentials
             | ApiErrorCode::InvalidGatewayKey
             | ApiErrorCode::TokenDisabled => StatusCode::UNAUTHORIZED,
             ApiErrorCode::Forbidden | ApiErrorCode::RegistrationClosed => StatusCode::FORBIDDEN,
@@ -1165,6 +1167,7 @@ mod tests {
                 token_pepper: Some([2; 32]),
                 admin_token_digest: admin_token
                     .map(|token| sha2::Sha256::digest(token.as_bytes()).into()),
+                admin_password: None,
                 gateway_event_retention_days: 30,
                 linuxdo_oauth: None,
                 default_upstream_pool_id: None,

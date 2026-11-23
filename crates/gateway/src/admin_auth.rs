@@ -2,11 +2,14 @@
 
 mod store;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError},
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Request, State},
+    extract::{DefaultBodyLimit, Path, Request, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::Response,
@@ -34,6 +37,10 @@ const SESSION_TTL_SECONDS: i64 = 8 * 60 * 60;
 const MAX_PASSKEYS: i64 = 12;
 const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
 const PASSKEY_ACTOR: &str = "passkey-admin";
+const PASSWORD_ACTOR: &str = "password-admin";
+const PASSWORD_FAILURE_LIMIT: u32 = 5;
+const PASSWORD_FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
+const PASSWORD_LOCKOUT: Duration = Duration::from_secs(10 * 60);
 
 type SecretDigest = [u8; 32];
 
@@ -89,6 +96,12 @@ impl CookieKind {
 }
 
 #[derive(Clone, Copy)]
+enum AdminSessionKind {
+    Passkey,
+    Password,
+}
+
+#[derive(Clone, Copy)]
 enum CeremonyPurpose {
     Login,
     Registration,
@@ -120,6 +133,9 @@ enum RegistrationPermit {
     Session {
         digest: SecretDigest,
     },
+    PasswordSession {
+        digest: SecretDigest,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -143,7 +159,9 @@ struct CredentialSubmission<T> {
 #[derive(Serialize)]
 struct SessionStatus {
     authenticated: bool,
+    password_login_available: bool,
     passkey_available: bool,
+    passkey_login_available: bool,
 }
 
 #[derive(Serialize)]
@@ -154,9 +172,29 @@ struct PasskeySummary {
     last_used_at: Option<i64>,
 }
 
+#[derive(Deserialize)]
+struct PasswordLoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Default)]
+struct PasswordFailureState {
+    failures: u32,
+    window_started: Option<Instant>,
+    blocked_until: Option<Instant>,
+}
+
+static PASSWORD_FAILURES: LazyLock<Mutex<PasswordFailureState>> =
+    LazyLock::new(|| Mutex::new(PasswordFailureState::default()));
+
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/session", get(session))
+        .route(
+            "/password/login",
+            post(password_login).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
         .route("/login/start", post(login_start))
         .route("/login/finish", post(login_finish))
         .route("/register/start", post(registration_start))
@@ -172,8 +210,12 @@ pub(crate) async fn authorize_admin(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<String, ApiError> {
-    if passkey_session(state, headers).await?.is_some() {
-        return Ok(PASSKEY_ACTOR.to_owned());
+    if let Some((_, kind)) = admin_session(state, headers).await? {
+        return Ok(match kind {
+            AdminSessionKind::Passkey => PASSKEY_ACTOR,
+            AdminSessionKind::Password => PASSWORD_ACTOR,
+        }
+        .to_owned());
     }
     if has_development_bearer(&state.config, headers) {
         return Ok("development-admin".to_owned());
@@ -211,10 +253,44 @@ async fn session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<SessionStatus>, ApiError> {
+    let authenticated = admin_session(&state, &headers).await?.is_some();
+    let passkey_login_available = store::active_passkey_count(&state.pool).await? > 0;
     Ok(Json(SessionStatus {
-        authenticated: passkey_session(&state, &headers).await?.is_some(),
+        authenticated,
+        password_login_available: state.config.admin_password_enabled(),
         passkey_available: state.config.admin_passkey_enabled(),
+        passkey_login_available,
     }))
+}
+
+async fn password_login(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    payload: Result<Json<PasswordLoginRequest>, JsonRejection>,
+) -> Result<(HeaderMap, Json<SessionStatus>), ApiError> {
+    check_origin(&state.config, &headers)?;
+    let config = state
+        .config
+        .admin_password
+        .as_ref()
+        .ok_or_else(|| ApiError::new(ApiErrorCode::NotConfigured))?;
+    let Json(request) = payload.map_err(|_| ApiError::new(ApiErrorCode::InvalidRequest))?;
+    ensure_password_login_allowed()?;
+    let password = Zeroizing::new(request.password);
+    if !config.verify(&request.username, password.as_str()) {
+        return Err(record_password_failure());
+    }
+    clear_password_failures();
+    let previous_session = cookie_digest(&state.config, &headers, CookieKind::Session);
+    let secret = store::new_password_session(
+        &state.pool,
+        state.config.public_origin.as_str(),
+        previous_session,
+        config.session_version(),
+    )
+    .await?;
+    let passkey_login_available = store::active_passkey_count(&state.pool).await? > 0;
+    authenticated_response(&state.config, None, &secret, passkey_login_available)
 }
 
 async fn login_start(
@@ -254,7 +330,7 @@ async fn login_finish(
         &result,
     )
     .await?;
-    authenticated_response(&state.config, CookieKind::Login, &secret)
+    authenticated_response(&state.config, Some(CookieKind::Login), &secret, true)
 }
 
 async fn registration_start(
@@ -280,14 +356,19 @@ async fn registration_start(
             }
         }
         None => {
-            let session_digest = passkey_session(&state, &headers)
+            let (session_digest, kind) = admin_session(&state, &headers)
                 .await?
                 .ok_or_else(unauthorized)?;
             if passkeys.len() as i64 >= MAX_PASSKEYS {
                 return Err(ApiError::new(ApiErrorCode::Conflict));
             }
-            RegistrationPermit::Session {
-                digest: session_digest,
+            match kind {
+                AdminSessionKind::Passkey => RegistrationPermit::Session {
+                    digest: session_digest,
+                },
+                AdminSessionKind::Password => RegistrationPermit::PasswordSession {
+                    digest: session_digest,
+                },
             }
         }
     };
@@ -325,10 +406,13 @@ async fn registration_finish(
     let registration: RegistrationState =
         take_ceremony(&state, &headers, CeremonyPurpose::Registration).await?;
     let previous_session = cookie_digest(&state.config, &headers, CookieKind::Session);
-    if let RegistrationPermit::Session { digest } = registration.permit
-        && previous_session != Some(digest)
-    {
-        return Err(unauthorized());
+    match &registration.permit {
+        RegistrationPermit::Session { digest } | RegistrationPermit::PasswordSession { digest }
+            if previous_session != Some(*digest) =>
+        {
+            return Err(unauthorized());
+        }
+        _ => {}
     }
     let passkey = webauthn
         .finish_passkey_registration(&request.credential, &registration.passkey_state)
@@ -339,9 +423,14 @@ async fn registration_finish(
         previous_session,
         &registration,
         &passkey,
+        state
+            .config
+            .admin_password
+            .as_ref()
+            .map(|password| password.session_version()),
     )
     .await?;
-    authenticated_response(&state.config, CookieKind::Registration, &secret)
+    authenticated_response(&state.config, Some(CookieKind::Registration), &secret, true)
 }
 
 async fn logout(
@@ -372,7 +461,7 @@ async fn list_passkeys(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<PasskeySummary>>, ApiError> {
-    passkey_session(&state, &headers)
+    admin_session(&state, &headers)
         .await?
         .ok_or_else(unauthorized)?;
     Ok(Json(store::passkey_summaries(&state.pool).await?))
@@ -399,6 +488,12 @@ async fn remove_passkey(
         &state.pool,
         state.config.public_origin.as_str(),
         &session,
+        state
+            .config
+            .admin_password
+            .as_ref()
+            .map(|password| password.session_version()),
+        state.config.admin_password_enabled(),
         &credential_id,
     )
     .await?;
@@ -447,6 +542,39 @@ async fn passkey_session(
     Ok(credential.map(|_| digest))
 }
 
+async fn admin_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<(SecretDigest, AdminSessionKind)>, ApiError> {
+    if let Some(digest) = passkey_session(state, headers).await? {
+        return Ok(Some((digest, AdminSessionKind::Passkey)));
+    }
+    if let Some(digest) = password_session(state, headers).await? {
+        return Ok(Some((digest, AdminSessionKind::Password)));
+    }
+    Ok(None)
+}
+
+async fn password_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<SecretDigest>, ApiError> {
+    let Some(config) = state.config.admin_password.as_ref() else {
+        return Ok(None);
+    };
+    let Some(digest) = cookie_digest(&state.config, headers, CookieKind::Session) else {
+        return Ok(None);
+    };
+    let valid = store::password_session_exists(
+        &state.pool,
+        state.config.public_origin.as_str(),
+        &digest,
+        config.session_version(),
+    )
+    .await?;
+    Ok(valid.then_some(digest))
+}
+
 async fn start_ceremony<T: Serialize>(
     state: &AppState,
     request_headers: &HeaderMap,
@@ -485,11 +613,14 @@ async fn take_ceremony<T: for<'de> Deserialize<'de>>(
 
 fn authenticated_response(
     config: &Config,
-    ceremony_cookie: CookieKind,
+    ceremony_cookie: Option<CookieKind>,
     secret: &str,
+    passkey_login_available: bool,
 ) -> Result<(HeaderMap, Json<SessionStatus>), ApiError> {
     let mut headers = HeaderMap::new();
-    headers.append(header::SET_COOKIE, cookie(config, ceremony_cookie, "", 0)?);
+    if let Some(ceremony_cookie) = ceremony_cookie {
+        headers.append(header::SET_COOKIE, cookie(config, ceremony_cookie, "", 0)?);
+    }
     headers.append(
         header::SET_COOKIE,
         cookie(config, CookieKind::Session, secret, SESSION_TTL_SECONDS)?,
@@ -498,7 +629,9 @@ fn authenticated_response(
         headers,
         Json(SessionStatus {
             authenticated: true,
-            passkey_available: true,
+            password_login_available: config.admin_password_enabled(),
+            passkey_available: config.admin_passkey_enabled(),
+            passkey_login_available,
         }),
     ))
 }
@@ -550,6 +683,57 @@ fn new_secret() -> Result<Zeroizing<String>, getrandom::Error> {
     let mut data = Zeroizing::new([0_u8; 32]);
     getrandom::fill(data.as_mut())?;
     Ok(Zeroizing::new(URL_SAFE_NO_PAD.encode(data.as_ref())))
+}
+
+fn password_failures() -> MutexGuard<'static, PasswordFailureState> {
+    PASSWORD_FAILURES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+fn ensure_password_login_allowed() -> Result<(), ApiError> {
+    let now = Instant::now();
+    let mut failures = password_failures();
+    if let Some(blocked_until) = failures.blocked_until {
+        if now < blocked_until {
+            return Err(ApiError::new(ApiErrorCode::RateLimited)
+                .retry_after(blocked_until.duration_since(now).as_secs().max(1) as i64));
+        }
+        *failures = PasswordFailureState::default();
+    }
+    if failures
+        .window_started
+        .is_some_and(|started| now.duration_since(started) > PASSWORD_FAILURE_WINDOW)
+    {
+        *failures = PasswordFailureState::default();
+    }
+    Ok(())
+}
+
+fn record_password_failure() -> ApiError {
+    let now = Instant::now();
+    let mut failures = password_failures();
+    if failures
+        .window_started
+        .is_none_or(|started| now.duration_since(started) > PASSWORD_FAILURE_WINDOW)
+    {
+        failures.failures = 0;
+        failures.window_started = Some(now);
+    }
+    failures.failures = failures.failures.saturating_add(1);
+    if failures.failures >= PASSWORD_FAILURE_LIMIT {
+        failures.blocked_until = Some(now + PASSWORD_LOCKOUT);
+    }
+    ApiError::new(ApiErrorCode::InvalidAdminCredentials)
+}
+
+fn clear_password_failures() {
+    *password_failures() = PasswordFailureState::default();
+}
+
+#[cfg(test)]
+pub(crate) fn reset_password_failures() {
+    clear_password_failures();
 }
 
 fn unauthorized() -> ApiError {

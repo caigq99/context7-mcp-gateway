@@ -1,6 +1,6 @@
 # Linux.do Connect OAuth 配置
 
-Gateway 使用 Linux.do Connect 作为用户登录身份源。管理员仍使用独立的 Passkey 登录；Linux.do 只控制普通用户控制台和 Gateway Key 自助管理。
+Gateway 使用 Linux.do Connect 作为普通用户登录身份源。Linux.do 只控制用户控制台和 Gateway Key 自助管理，不提供管理员权限。管理员登录是独立的环境变量用户名/密码认证，Passkey 为登录后可选绑定；两者都不经过 Linux.do。
 
 ## 1. 创建 Linux.do OAuth 应用
 
@@ -43,7 +43,7 @@ LINUXDO_OAUTH_SCOPE="openid profile"
 同时必须满足：
 
 - `PUBLIC_ORIGIN` 与回调地址的协议、主机和端口完全一致。
-- 本地 Passkey 预览使用 `PUBLIC_ORIGIN=http://localhost:8787`，不要混用 `127.0.0.1`。
+- 若还要在管理端绑定或使用 Passkey，本地预览使用 `PUBLIC_ORIGIN=http://localhost:8787`，不要混用 `127.0.0.1`；Passkey 是可选能力。
 - `GATEWAY_TOKEN_PEPPER` 已配置。OAuth state、PKCE 和用户会话都依赖它；缺失时登录接口返回 `503 not_configured`。
 - 生产环境必须使用 HTTPS DNS 域名，`LINUXDO_OAUTH_REDIRECT_URL` 必须等于 `PUBLIC_ORIGIN + /auth/linuxdo/callback`，且不能带 query。
 
@@ -67,7 +67,7 @@ DEFAULT_UPSTREAM_POOL_ID=你的_pool_id
 
 ## 4. 打开用户注册
 
-用管理员 Passkey 登录：
+用管理员账号登录。默认使用 `GATEWAY_ADMIN_USERNAME`/`GATEWAY_ADMIN_PASSWORD` 密码登录；如果此前绑定过 Passkey，登录页也会显示可选的 **Sign in with passkey**：
 
 ```text
 http://localhost:8787/admin/login
@@ -107,7 +107,7 @@ Gateway -> connect.linux.do 授权页 -> /auth/linuxdo/callback -> /console/dash
 | Linux.do 显示回调地址不匹配 | 控制台回调与 `LINUXDO_OAUTH_REDIRECT_URL` 不一致 | 两处都改成完全相同的 URL，含端口和路径 |
 | 回调返回 `401 unauthorized` | state Cookie 丢失/过期、回调用了不同主机名、重复回调 | 使用同一 Origin，关闭阻止 Cookie 的插件后重试 |
 | 新用户回调返回 `403 registration_closed` | 注册开关关闭，或默认 Pool 无 eligible Key | 先验证上游 Key，再打开注册 |
-| 从 `localhost` 换成 `127.0.0.1` 后无法登录 | OAuth state/Cookie 和 Passkey Origin 不再一致 | 保持使用同一个 Origin |
+| 从 `localhost` 换成 `127.0.0.1` 后用户登录失败 | OAuth state/Cookie 使用了不同 Origin | 保持使用同一个 Origin；管理员 Passkey（如已绑定）也受 WebAuthn Origin 约束 |
 | 修改域名后老用户无法匹配 | 用户绑定使用 issuer + subject | 保留原 userinfo origin，或执行明确的数据迁移 |
 
 ## 7. 生产检查清单
@@ -115,6 +115,7 @@ Gateway -> connect.linux.do 授权页 -> /auth/linuxdo/callback -> /console/dash
 - Linux.do 应用回调地址与 `PUBLIC_ORIGIN` 完全一致。
 - TLS 终止在可信反向代理，转发真实 Host 和 HTTPS scheme。
 - Client Secret 只存在于部署平台的 Secret/环境变量中。
+- 管理员默认使用 `GATEWAY_ADMIN_USERNAME`/`GATEWAY_ADMIN_PASSWORD`；两项同时设置或同时留空，`.env` 权限为 `600`。Passkey 可在登录后从 Settings 可选绑定。
 - `GATEWAY_ENCRYPTION_KEY` 和 `GATEWAY_TOKEN_PEPPER` 已独立备份且保持稳定。
 - 默认 Pool 有已激活的上游 Key，且池未处于限流/熔断状态。
-- 开放注册前先完成一次真实 Linux.do 登录和控制台跳转测试。
+- 开放注册前先完成一次真实 Linux.do 用户登录和控制台跳转测试，并单独验证管理员密码/可选 Passkey 登录。

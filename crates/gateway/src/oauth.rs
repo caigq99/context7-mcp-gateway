@@ -707,6 +707,7 @@ mod tests {
             encryption_key: Some([1; 32]),
             token_pepper: Some([2; 32]),
             admin_token_digest: None,
+            admin_password: None,
             gateway_event_retention_days: 30,
             linuxdo_oauth: Some(LinuxDoOAuthConfig {
                 client_id: "mock-client".to_owned(),

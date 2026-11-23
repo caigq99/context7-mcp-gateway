@@ -4,12 +4,13 @@
 
 ## 生产配置
 
-复制 `.env.example` 到 `.env`，权限设为仅部署用户可读写，并替换全部示例值。`.env` 已被 Git 忽略，不要提交或贴到聊天/工单。两项密码学秘密各自独立生成，保持服务器端加密密钥和 pepper 的离线安全备份；更换任一值都会破坏已有的上游 Key 解密或 Gateway Key 校验能力。
+复制 `.env.example` 到 `.env`，权限设为仅部署用户可读写，并替换全部示例值。`.env` 已被 Git 忽略，不要提交或贴到聊天/工单。两项密码学秘密各自独立生成，保持服务器端加密密钥和 pepper 的离线安全备份；更换任一值都会破坏已有的上游 Key 解密或 Gateway Key 校验能力。管理员密码同样只放在 `.env` 或平台的 Secret 管理器中，不要把明文写入 Compose 文件、镜像、脚本或日志。
 
 ```sh
 umask 077
 cp .env.example .env
 chmod 600 .env
+stat -c '%a %n' .env  # 应输出 600
 # 每行分别用独立、密码学安全的随机 32 字节 base64url（不含 =）值替换占位符。
 # OpenSSL 示例：两次调用输出不同的、独立的随机值。
 openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
@@ -18,13 +19,14 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 
 必须设置：
 
-- `APP_ENV=production`，`PUBLIC_ORIGIN=https://<DNS hostname>`：Public origin 必须是无路径、无查询的 HTTPS DNS Origin；浏览器中使用的协议、域名和端口必须匹配。Passkey Cookie 只有在 HTTPS 下才会发出。
+- `GATEWAY_ADMIN_USERNAME` 和 `GATEWAY_ADMIN_PASSWORD`：默认管理员登录。两项必须同时设置；只设置一项会导致启动配置错误。用户名须为 1–64 个字符；生产密码至少 12 个字符、最长 256 个字符，建议使用密码管理器生成 20 个以上随机字符并且不要复用。启动时密码仅以 Argon2id 哈希保留在进程内存中，明文不写入数据库、日志、前端或审计记录。只有明确采用 passkey-only 兼容模式时才同时留空两项，并按下文旧版流程引导。
+- `APP_ENV=production`，`PUBLIC_ORIGIN=https://<DNS hostname>`：Public origin 必须是无路径、无查询的 HTTPS DNS Origin；浏览器中使用的协议、域名和端口必须匹配。管理员会话 Cookie 仅在 HTTPS 下带 `Secure`，Passkey 还需要 HTTPS DNS Origin 才能工作。
 - `GATEWAY_ENCRYPTION_KEY` 和 `GATEWAY_TOKEN_PEPPER`：独立的 32 字节 base64url 秘密。不要丢失、轮换或在多个环境中复用。
 - Linux.do OAuth：`LINUXDO_OAUTH_ENABLED=true`，Client ID/Secret 和精确 callback `https://<hostname>/auth/linuxdo/callback`。
 - `DEFAULT_UPSTREAM_POOL_ID`：默认注册池的 ID。开启注册前，该池必须已启用且至少有一把可调度的 active Key（未被池级限流或熔断），否则设置接口拒绝开启。
 - `GATEWAY_EVENT_RETENTION_DAYS`：可选整数 `1..=365`，默认为 `30`。
 
-不要在生产配置设置 `GATEWAY_ADMIN_TOKEN`；程序拒绝非空生产 Bearer token。管理员用 HTTPS Passkey 会话工作，首次注册和恢复使用部署主机本地 CLI 的一次性验证码（见 [`admin-auth.md`](admin-auth.md)）。
+不要在生产配置设置 `GATEWAY_ADMIN_TOKEN`；程序拒绝非空生产 Bearer token。管理员默认使用 `.env` 中的用户名/密码登录；Passkey 是登录后可选绑定的第二凭证，密码登录不会因绑定 Passkey 而停用。passkey-only 兼容模式、CLI 初始注册与恢复流程见 [`admin-auth.md`](admin-auth.md)。
 
 ## Compose 启动
 
@@ -36,7 +38,7 @@ docker compose ps
 curl --fail --silent https://gateway.example.com/health/ready
 ```
 
-镜像构建采用 `cargo build --release --locked`。服务默认以 UID/GID `10001`、read-only root filesystem、仅数据库卷可写、丢弃 Linux capabilities 与 `no-new-privileges` 运行。Host 端口默认只映射 `127.0.0.1:8787`，建议使用宿主机上的 TLS 反向代理作为唯一公开入口。反向代理需限制请求体、设置合理超时（MCP/SSE 请求可能较长）、只转发真实 Host/HTTPS scheme，并保护管理控制台。若把 Gateway 与代理放在隔离容器网络，改为不发布 Host 端口并通过共享受限 Docker network 接入，而不要在互联网接口上直接发布无 TLS 的 `8787`。
+镜像构建采用 `cargo build --release --locked`。服务默认以 UID/GID `10001`、read-only root filesystem、仅数据库卷可写、丢弃 Linux capabilities 与 `no-new-privileges` 运行。Host 端口默认只映射 `127.0.0.1:8787`，建议使用宿主机上的 TLS 反向代理作为唯一公开入口。反向代理需限制请求体、设置合理超时（MCP/SSE 请求可能较长）、只转发真实 Host/HTTPS scheme，并保护管理控制台。还应针对 `/admin/login` 和 `/api/admin/auth/password/login` 配置独立的登录限流；应用内的失败限流只是纵深防御。若把 Gateway 与代理放在隔离容器网络，改为不发布 Host 端口并通过共享受限 Docker network 接入，而不要在互联网接口上直接发布无 TLS 的 `8787`。
 
 本仓库基线已在 2026-11-22 完成一次镜像构建与生产模式 Compose 冒烟：`/health/ready` 返回 ready，数据库卷由 UID 10001 写入，容器保持只读 rootfs、cap-drop ALL 和 `no-new-privileges`。这只是构建基线证据；每次发布仍应在目标主机重新构建并执行下述备份、恢复和告警检查。
 
@@ -44,17 +46,25 @@ curl --fail --silent https://gateway.example.com/health/ready
 
 ## 引导首个管理员与上游池
 
-生产部署初期应关闭开放注册。在首次引导，若还没有已建 Pool，可临时将 `DEFAULT_UPSTREAM_POOL_ID` 设为非空 `bootstrap-pending`。先启动受 TLS 保护、仅可由运维网络访问的实例，再在 Gateway 容器中签发单次初始管理员注册码：
+生产部署初期应关闭开放注册。先确认 `.env` 权限为 `600`，并同时填写两个管理员变量（或明确采用 passkey-only 兼容模式）。首次引导时若还没有已建 Pool，可临时将 `DEFAULT_UPSTREAM_POOL_ID` 设为非空 `bootstrap-pending`。在 `.env` 中设置：
 
 ```sh
-docker compose exec context7-gateway context7-gateway admin issue-enrollment
+GATEWAY_ADMIN_USERNAME=REPLACE_WITH_ADMIN_USERNAME
+GATEWAY_ADMIN_PASSWORD=REPLACE_WITH_20_PLUS_RANDOM_CHARACTERS
 ```
 
-在 `https://<hostname>/admin/login` 输入注册码并完成浏览器 Passkey 注册。登录后创建 Context7 Pool、录入并验证 Key（可单条录入，或用 `POST /api/admin/pools/$POOL_ID/keys/bulk` 批量导入，导入项初始为 `pending`）。之后把返回的 Pool ID 写到 `DEFAULT_UPSTREAM_POOL_ID` 并重启 Compose；在上线前实际测试 OAuth 回调、Gateway Key 与上游用法。不可通过未经支持的 SQL 写入绕过管理员流程。
+确认权限后启动受 TLS 保护、仅可由运维网络访问的实例：
+
+```sh
+chmod 600 .env
+docker compose up -d
+```
+
+打开 `https://<hostname>/admin/login`，使用上述用户名/密码登录。首次登录后建议立即进入 **Settings -> Passkeys** 绑定一把可选的 Passkey，并保留密码作为恢复方式；Passkey 也可以稍后添加，或保持不配置。随后创建 Context7 Pool、录入并验证 Key（可单条录入，或用 `POST /api/admin/pools/$POOL_ID/keys/bulk` 批量导入，导入项初始为 `pending`）。之后把返回的 Pool ID 写到 `DEFAULT_UPSTREAM_POOL_ID` 并重启 Compose；在上线前实际测试密码/可选 Passkey 登录、OAuth 回调、Gateway Key 与上游用法。不可通过未经支持的 SQL 写入绕过管理员流程。
 
 注册开关只做运行时配置检查：`PATCH /api/admin/settings` 设置 `registration_open=true` 时，服务会验证默认池已启用、存在可调度 Key，并确认 Linux.do OAuth 与两项密码学秘密已配置；不满足时拒绝开启。该检查不验证上游合同许可，运营者仍需按 [`phase0-operator-record.md`](phase0-operator-record.md) 的声明使用 Key。
 
-若管理员 Passkey 丢失，使用 [`admin-auth.md`](admin-auth.md) 中的 `--recovery` 流程重新绑定；旧 Passkey 和会话在新 Passkey 验证成功后一起撤销。
+若管理员 Passkey 丢失，直接使用密码登录，再在 **Settings -> Passkeys** 绑定替代凭证并移除旧 Passkey。若密码遗失，由具备部署主机或 Secret 管理权限的运营者更新 `GATEWAY_ADMIN_PASSWORD` 并重启；旧密码会话会因版本绑定立即失效。只有 passkey-only 模式或迁移前的旧环境才使用 [`admin-auth.md`](admin-auth.md) 中的 CLI 注册码与 `--recovery` 流程。
 
 ## 在线备份
 

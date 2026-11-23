@@ -1,6 +1,6 @@
 # Operations Runbook (Current Bootstrap API)
 
-Administrative examples use the development bootstrap token from the process environment; never put it in a URL or commit it. Production administrators authenticate with a registered Passkey. The operator declares and maintains the upstream keys and is responsible for their intended use; the gateway does not verify upstream contractual permission. Registration is closed by default. This runbook covers operator-maintained upstream pools/keys, users and Gateway Keys. See [Local quota, usage, and billing](quota-and-billing.md) for quota assignment, account-isolated request history, cleanup, local ledger, redemptions, and disabled-by-default payment sandbox operations.
+Administrative examples use the development bootstrap token from the process environment; never put it in a URL or commit it. Production administrators use `GATEWAY_ADMIN_USERNAME`/`GATEWAY_ADMIN_PASSWORD` by default; Passkeys are optional credentials bound after login. The operator declares and maintains the upstream keys and is responsible for their intended use; the gateway does not verify upstream contractual permission. Registration is closed by default. This runbook covers operator-maintained upstream pools/keys, users and Gateway Keys. See [Local quota, usage, and billing](quota-and-billing.md) for quota assignment, account-isolated request history, cleanup, local ledger, redemptions, and disabled-by-default payment sandbox operations.
 
 ```sh
 export GATEWAY_ADMIN_TOKEN='...'

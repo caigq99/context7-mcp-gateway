@@ -88,6 +88,7 @@ mod tests {
             encryption_key: None,
             token_pepper: None,
             admin_token_digest: None,
+            admin_password: None,
             gateway_event_retention_days: 30,
             linuxdo_oauth: None,
             default_upstream_pool_id: None,

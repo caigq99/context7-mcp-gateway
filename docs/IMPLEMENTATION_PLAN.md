@@ -2,7 +2,7 @@
 
 > 文档状态：实施基线（v1）
 >
-> 编写日期：2026-11-21；最近更新：2026-11-22
+> 编写日期：2026-11-21；最近更新：2026-11-23
 >
 > 项目状态：核心代码与控制台已落地；Phase 0 为“运营者声明 + 上游契约验证（非阻断）”，声明记录见 [`phase0-operator-record.md`](phase0-operator-record.md)；受控错误/会话测试、部署主机镜像/恢复演练和独立安全评审仍是生产发布 Gate。
 >
@@ -21,6 +21,7 @@
 5. **数据最小化**：默认不持久化用户原始查询文本、完整 MCP 报文或文档响应正文。
 6. **首期不实现 Context7 管理功能**：不代理 Admin MCP、不管理用户的 Context7 Teamspace、来源、策略或文档库写操作。
 7. **可选支付**：充值仅增加本服务本地额度；支付适配器默认关闭，不能代表或代替 Context7 官方计费。
+8. **管理员默认密码登录，Passkey 可选**：新部署从 `GATEWAY_ADMIN_USERNAME` 与 `GATEWAY_ADMIN_PASSWORD` 引导管理员登录；Passkey 在登录后从管理设置中可选绑定，密码登录保持可用。两项密码变量都未配置时保留 passkey-only 兼容模式和 CLI 初始注册/恢复。
 
 ### 运营者声明与注册前提（非阻断）
 
@@ -81,7 +82,8 @@ MCP/HTTP Client
 - Context7 上游 Key 使用应用层认证加密后存储；生产密钥由部署平台 Secret/KMS 注入，数据库仅持密文、Key Hint 和密钥版本。密钥缺失、解密失败或版本不匹配时必须 fail closed。
 - Gateway Key 使用密码学安全随机数生成；数据库保存带服务端 pepper 的 HMAC-SHA-256 摘要、不可逆前缀、用户关联、状态、权限范围和创建/使用时间。完整值仅创建成功时返回一次；重置即生成新值并撤销旧值。
 - Key 管理、用户管理、额度变更、订单记账等管理操作均写追加式管理员审计事件；审计事件不包含秘密值。
-- 管理员认证与用户 OAuth 会话分开；生产管理员路径默认启用 Passkey/WebAuthn，另提供受控的恢复路径；不提供无认证生产模式。
+- 管理员认证与用户 OAuth 会话分开；默认使用 `GATEWAY_ADMIN_USERNAME`/`GATEWAY_ADMIN_PASSWORD` 登录，两者必须同时配置。密码在启动时仅以 Argon2id 哈希保留在进程内存中，明文不写入数据库、日志、前端或审计。Passkey 是登录后可选绑定的附加凭证，密码登录保持可用；两项密码变量都未配置时保留 passkey-only 的 CLI 初始注册/恢复。
+- 管理员密码登录失败统一返回 `401 invalid_admin_credentials`，重复失败限流并返回 `429`；密码或用户名变更通过会话版本绑定使已有密码会话失效。不提供无认证生产模式；开发/测试用 `GATEWAY_ADMIN_TOKEN` 不得用于生产。
 - 不允许通过 URL query string 传递 Gateway Key；客户端示例使用环境变量占位符，防止 URL、浏览器历史或代理访问日志意外留存凭证。
 
 ## 5. 数据模型基线
@@ -91,7 +93,7 @@ MCP/HTTP Client
 | 实体 | 核心字段/约束 |
 |---|---|
 | `users` | `id`、OAuth issuer/subject 唯一键、昵称、状态、创建时间、最后登录时间 |
-| `auth_sessions` / `oauth_states` / `admin_passkeys` | 用户与管理员会话分开存储；OAuth state 一次性、短时有效；管理员 Passkey credential ID、公钥材料、计数器和注册时间 |
+| `auth_sessions` / `oauth_states` / `admin_passkeys` / `admin_password_sessions` | 用户与管理员会话分开存储；OAuth state 一次性、短时有效；管理员 Passkey credential ID、公钥材料、计数器和注册时间；密码会话保存版本绑定摘要与有效期，不保存密码或 Argon2id 哈希 |
 | `upstream_pools` | `id`、名称、用途/账务范围标签、调度策略、启用状态；池不可混合不同账户/Teamspace 边界 |
 | `upstream_keys` | `id`、`pool_id`、密文、nonce/key version、展示用前缀、状态(`active/disabled/invalid/permission_error/rate_limited`)、最近验证/成功/失败时间、限流截止时间、上次使用时间 |
 | `gateway_tokens` | `id`、`user_id`、摘要、唯一前缀、名称/备注、权限范围、状态、可选过期时间、创建/最后使用/撤销时间 |
@@ -130,6 +132,7 @@ MCP/HTTP Client
 
 ### 管理员 API
 
+- `GET /api/admin/auth/session` 返回 `{authenticated,password_login_available,passkey_available,passkey_login_available}`；`POST /api/admin/auth/password/login` 接收 `{username,password}`，错误凭据返回 `401 invalid_admin_credentials`，重复失败返回 `429`。Passkey 启动/完成、注册、注销与凭证管理路由继续位于同一前缀下。
 - `GET/POST /api/admin/pools` 与 `GET/POST /api/admin/pools/:id/keys`：建立池、录入/停用/恢复/删除密钥、验证凭证；`POST /api/admin/pools/:id/keys/bulk` 单次最多导入 100 把 Key，路由请求体上限 64 KiB，导入项初始为 `pending`，逐项报告重复/无效且不回显 Key 值或非法 JSON 原文。
 - `GET /api/admin/keys/:id/status`：检查单 Key 上游可用性和可用的官方 usage 信息；所有返回都必须脱敏。
 - `GET /api/admin/users`、`GET/PATCH /api/admin/users/:id`、`PATCH /api/admin/users/:id/quota`：管理用户、状态与本地配额。
@@ -166,18 +169,18 @@ MCP/HTTP Client
 
 ## 8. 分阶段实施与验收
 
-### 实施进度（2026-11-22；以可复跑检查为准）
+### 实施进度（2026-11-23；以可复跑检查为准）
 
 | 阶段 | 当前状态 | 证据 / 未完成事项 |
 |---|---|---|
 | Phase 0 — 运营者声明与上游契约验证 | **声明已完成（DECLARED）；契约验证部分完成（非阻断）** | 运营者声明记录见 [`phase0-operator-record.md`](phase0-operator-record.md)；官方文档已查阅；2026-11-22 本地成功冒烟覆盖 MCP 新旧协议与四个 REST 读接口；401/403/429/5xx、legacy session 绑定、SSE 恢复和去重计费已由 loopback mock 测试覆盖。剩余项是部署计划上的一次受控负向验证与部署观测；这些项非阻断，注册仍受默认池可调度 Key 与 OAuth/加密配置的运行时检查约束。 |
 | Phase 1 — 骨架与持久化 | **实现完成** | Rust/Axum、React/Vite、SQLx SQLite 迁移、健康检查、CI、Compose 和数据库备份/恢复脚本已提供。需在目标部署主机再运行一次镜像构建/恢复演练。 |
-| Phase 2 — 身份与密钥池 | **实现完成；外部 OAuth 配置待部署验证** | Linux.do state+PKCE、浏览器会话、Passkey 管理员及初始/恢复注册码、上游密钥加密、单条/批量导入（最多 100 条，逐项报告重复/无效且不回显原值）、Gateway Key scope/expiry/rotate/revoke 已实现；Passkey 有软件认证器端到端测试。 |
+| Phase 2 — 身份与密钥池 | **实现完成；外部 OAuth 配置待部署验证** | Linux.do state+PKCE、浏览器会话、管理员密码登录（启动时 Argon2id 内存哈希、失败限流、会话版本失效）、可选 Passkey 绑定与密码保持可用的登录规则、passkey-only 的 CLI 初始/恢复注册码、上游密钥加密、单条/批量导入（最多 100 条，逐项报告重复/无效且不回显原值）、Gateway Key scope/expiry/rotate/revoke 已实现；Passkey 有软件认证器端到端测试，密码/可选 Passkey 引导仍需目标部署实测。 |
 | Phase 3 — MCP/REST 代理 | **实现与 mock 验收完成；真实 session 仍待部署观测** | 2026-11-22 经本地 Gateway 的 MCP `tools/list`/两个标准工具和四条 REST 均成功；mock 覆盖 401/403/429/5xx、熔断、session 跨 Token 隔离和 SSE 恢复不重复扣费。上游未下发真实 session，部署后应再观测一次 session 生命周期。 |
 | Phase 4 — 配额与用量 | **实现完成** | 原子预留/结算、并发与边界测试、请求事件、配额汇总、保留期和 60 秒清理已接入。 |
-| Phase 5 — 控制台 | **实现完成** | 中英文用户/管理员界面、批量上游 Key 导入和设置指南已接入；Playwright 流程 13/13 通过（含虚拟 WebAuthn 认证器注册），`npm run build` 通过。 |
+| Phase 5 — 控制台 | **实现完成** | 中英文用户/管理员界面、批量上游 Key 导入和设置指南已接入；Playwright 流程 16/16 通过（含密码默认登录、可选 Passkey 与虚拟 WebAuthn 认证器注册），`npm run build` 通过。 |
 | Phase 6 — 本地订单/额度 | **本地流程完成；真实支付未纳入** | 本地积分账本、兑换码、签名沙箱订单、反向调账和对账 API/UI 已实现；生产 payment provider 故意禁用，订单额度是 Gateway 本地额度。 |
-| Phase 7 — 发布加固 | **实现与容器验收完成；审计/演练待外部执行** | 非 root、只读 rootfs、cap-drop、no-new-privileges 的生产 Compose 已实测健康；镜像构建成功；SQLite 备份/恢复演练、`npm audit`（生产依赖 0 漏洞）与 Compose 配置检查通过。独立安全评审、生产负载与部署特定恢复演练仍未完成。 |
+| Phase 7 — 发布加固 | **实现与容器验收完成；审计/演练待外部执行** | 非 root、只读 rootfs、cap-drop、no-new-privileges 的生产 Compose 已实测健康；镜像构建成功；SQLite 备份/恢复演练、`npm audit`（生产依赖 0 漏洞）与 Compose 配置检查通过；管理员密码/可选 Passkey 引导、轮换和登录失败限流纳入发布检查。独立安全评审、生产负载、目标主机登录实测与部署特定恢复演练仍未完成。 |
 
 阶段“实现完成”仅表示本仓库内交付和现有测试达到标记，不构成生产上线批准；Phase 0 运营者声明也不构成软件对上游合同许可的验证。
 
@@ -215,14 +218,14 @@ MCP/HTTP Client
 
 **工作项**
 - 用户：接入 Linux.do Connect OAuth 登录和登出、会话轮换、账户禁用；OAuth 回调校验 state/nonce、过期与重复回调。
-- 管理员：独立 Passkey/WebAuthn 首次注册与恢复流程；确保用户会话不能调用管理员接口。
+- 管理员：默认 `GATEWAY_ADMIN_USERNAME`/`GATEWAY_ADMIN_PASSWORD` 密码登录；启动时用 Argon2id 仅在内存中哈希，错误凭据统一 `401`，重复失败限流 `429`，密码/用户名变更使既有密码会话失效。登录后可选绑定 Passkey，密码登录保持可用；两项密码变量都未配置时保留 passkey-only 的 CLI 首次注册与恢复。确保用户会话不能调用管理员接口。
 - Gateway Key：签发高熵随机 Token、一次展示、摘要校验、命名、撤销、轮换、过期和权限 scope；同一用户可有多把 Key。
 - 上游池：管理员创建 Pool、单条或批量录入 Context7 Key、应用层加密、验证、停用/恢复、删除、状态检查与失败原因；列表/详情仅展示脱敏值。
 - 为 Key 增加显式的账户/Teamspace 标签与策略；每个 Key 的归属和加入操作记录审计事件。
 
-**交付物**：用户/管理员认证、`users`/`gateway_tokens`/`upstream_pools`/`upstream_keys`/审计迁移、管理员 Key 管理 API 与最小操作页。
+**交付物**：用户/管理员认证（密码 + 可选 Passkey）、`users`/`gateway_tokens`/`upstream_pools`/`upstream_keys`/审计迁移、管理员 Key 管理 API 与最小操作页。
 
-**验收标准**：Gateway Key 只显示一次且 DB 中找不到明文；撤销后立刻无法鉴权；普通用户无法列举/验证/停用上游 Key；DB 被复制但没有应用主密钥时不能解密上游 Key；跨用户、跨管理员权限和 OAuth CSRF 测试全通过。
+**验收标准**：Gateway Key 只显示一次且 DB 中找不到明文；撤销后立刻无法鉴权；普通用户无法列举/验证/停用上游 Key；DB 被复制但没有应用主密钥时不能解密上游 Key；密码登录成功/失败/限流、密码轮换会话失效、密码会话绑定 Passkey、密码登录下移除最后一把 Passkey 均通过测试；passkey-only 最后一把保护和恢复流程保持正确；跨用户、跨管理员权限和 OAuth CSRF 测试全通过。
 
 ### Phase 3 — MCP/REST 转发与受控调度
 
@@ -289,7 +292,7 @@ MCP/HTTP Client
 **目标**：达到可安全部署、升级、备份、观测和回滚的运营标准。
 
 **工作项**
-- 审核 TLS、反向代理信任边界、Secure/HttpOnly/SameSite Cookie、CSP、CSRF、CORS、速率限制、登录暴力尝试和管理员恢复路径。
+- 审核 TLS、反向代理信任边界、Secure/HttpOnly/SameSite Cookie、CSP、CSRF、CORS、速率限制、管理员密码强度/Argon2id/失败限流、密码轮换后的会话失效、可选 Passkey 与 passkey-only 恢复路径。
 - 容器以非 root 用户运行，最小化文件权限，健康检查不过度暴露内部信息；锁定依赖并进行依赖漏洞扫描与 SBOM 输出。
 - 设计 SQLite 在线备份/定期恢复演练、迁移前备份、版本回滚约束、保留策略和事故响应手册。
 - 完成集成/端到端测试、关键组件故障演练、负载/并发测试、恢复测试与第三方安全评审。
@@ -297,12 +300,12 @@ MCP/HTTP Client
 
 **交付物**：生产 Docker Compose/部署说明、备份与恢复 SOP、威胁模型、告警面板/日志规范、版本发布与回滚清单。
 
-**验收标准**：从空环境可完成部署并验证健康状态；恢复演练成功；密钥轮换演练可不中断或按预期 fail closed；安全/负载/恢复检查通过；运营者声明记录与当前默认池、用户范围和部署配置保持一致。
+**验收标准**：从空环境可完成部署并验证健康状态；管理员密码登录、可选 Passkey 绑定、密码轮换会话失效和登录失败 `429` 实测通过；恢复演练成功；密钥轮换演练可不中断或按预期 fail closed；安全/负载/恢复检查通过；运营者声明记录与当前默认池、用户范围和部署配置保持一致。
 
 ## 9. 全局测试矩阵
 
 1. **上游合约**：MCP 2026 新式与 2025 legacy initialize/tools/list/tools/call、会话、SSE/事件恢复，REST 参数与响应、认证、限流头、上游超时和不规范响应。
-2. **安全隔离**：Gateway Key 随机性/摘要保存/撤销、用户间越权、管理员/用户权限边界、上游 Key 密文、日志脱敏、任意 URL/路径/Header 注入。
+2. **安全隔离**：Gateway Key 随机性/摘要保存/撤销、用户间越权、管理员/用户权限边界、管理员密码 Argon2id 内存哈希/登录失败限流/密码轮换会话失效/可选 Passkey 规则、上游 Key 密文、日志脱敏、任意 URL/路径/Header 注入。
 3. **配额/调度**：UTC 月界、日界、并发计数、禁用/失效/限流 Key、无 Key 可用、池边界、`Retry-After`、禁止以 429 触发违规密钥轮换。
 4. **前端流程**：登录、Token 新建与轮换、教程代码、MCP 连通验证、额度不足、日志分页、公告、响应式。
 5. **支付（Phase 6）**：订单状态机、签名验证、重放/幂等、金额不匹配、过期、失败回调、额度账本反向调整。
@@ -319,7 +322,8 @@ MCP/HTTP Client
 - `docs/operations.md`：上游池维护、用户/额度管理、限流故障排查、日志/告警和事故处理。
 - `docs/phase0-operator-record.md`：运营者声明、目标池/用户范围与运行时注册前提。
 - `docs/client-setup.md`：各 MCP 客户端和 HTTP API 接入指南。
-- `.env.example`：仅示例变量名与占位符，不得提交真实凭证。
+- `docs/admin-auth.md`：管理员密码登录、可选 Passkey 绑定、密码轮换与 passkey-only CLI 恢复。
+- `.env.example`：仅示例变量名与占位符，包含管理员密码变量的 both-or-neither 说明，不得提交真实凭证。
 
 ## 11. 假设与明确暂缓项
 

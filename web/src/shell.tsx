@@ -77,7 +77,7 @@ function Application() {
   if (admin && resource === 'login') {
     if (adminSession.value.state === 'loading') return <><SkipToContent /><main className="auth-loading"><Loading /></main></>;
     if (adminSession.value.state === 'error') return <><SkipToContent /><main className="auth-loading"><ErrorNotice error={adminSession.value.error} retry={adminSession.refresh} /></main></>;
-    return <><SkipToContent /><div className="login-page"><AdminSignIn available={adminSession.value.data.passkey_available} onSuccess={() => {
+    return <><SkipToContent /><div className="login-page"><AdminSignIn session={adminSession.value.data} onSuccess={() => {
       adminSession.refresh();
       navigate('/admin/dashboard');
     }} /></div></>;
@@ -101,7 +101,7 @@ function Application() {
 
   if (admin && !protectedBySession) return <>
     <SkipToContent />
-    <div className="login-page"><AdminSignIn available={adminSession.value.state === 'ready' && adminSession.value.data.passkey_available} onSuccess={() => {
+    <div className="login-page"><AdminSignIn session={adminSession.value.state === 'ready' ? adminSession.value.data : null} onSuccess={() => {
       adminSession.refresh();
       navigate('/admin/dashboard');
     }} /></div>

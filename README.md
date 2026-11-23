@@ -4,7 +4,7 @@ Context7 MCP Gateway is a self-hostable, Rust-based gateway for Context7. The op
 
 ## Implementation status
 
-The first end-to-end implementation is in place: Context7 MCP and four read-only REST proxies; encrypted operator-maintained upstream keys with single and bulk import; Gateway Key scopes, expiry, rotation and revocation; Linux.do OAuth/PKCE user sessions; Passkey-only production administration; atomic local quota accounting and request history; user/admin consoles; client setup guides; announcements; and local quota-credit, redemption and sandbox order flows. See the phase status and remaining verification work in [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
+The first end-to-end implementation is in place: Context7 MCP and four read-only REST proxies; encrypted operator-maintained upstream keys with single and bulk import; Gateway Key scopes, expiry, rotation and revocation; Linux.do OAuth/PKCE user sessions; production administration with a username/password login and optional Passkeys; atomic local quota accounting and request history; user/admin consoles; client setup guides; announcements; and local quota-credit, redemption and sandbox order flows. See the phase status and remaining verification work in [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
 **The operator declares and maintains the upstream keys; this repository does not verify upstream contractual permissions.** The operator is responsible for using each key within its intended account/Teamspace and user scope. Registration remains closed by default and is opened only by an administrator after the configured default pool has an eligible active key and the OAuth and cryptographic configuration prerequisites are met. The repository intentionally disables production payment providers; the image build and a hardened Compose smoke are verified in this workspace, while an independent security review and deployment-specific drills remain release gates.
 
@@ -18,7 +18,7 @@ Phase 0 is an operator declaration plus upstream contract verification, recorded
 
 ## Run locally
 
-For a single-process preview that also supports administrator Passkeys, build the frontend once and serve it from the Rust process:
+For a single-process preview with administrator password login and optional Passkeys, build the frontend once and serve it from the Rust process:
 
 ```sh
 cd web
@@ -28,17 +28,17 @@ cd ..
 
 export APP_ENV=development
 export PUBLIC_ORIGIN="http://localhost:8787"
+# Set both administrator variables together, or omit both for passkey-only mode.
+export GATEWAY_ADMIN_USERNAME="admin"
+export GATEWAY_ADMIN_PASSWORD="local-development-password-change-me"
+# Optional development/test bearer for API scripts; the admin UI uses password login.
 export GATEWAY_ADMIN_TOKEN="$(openssl rand -hex 32)"
 export GATEWAY_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 export GATEWAY_TOKEN_PEPPER="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 cargo run --locked -p context7-gateway
 ```
 
-Open `http://localhost:8787/console` and `http://localhost:8787/admin/login`. Use the literal hostname `localhost`, not `127.0.0.1`, when testing Passkeys. Issue the one-time administrator enrollment code in another terminal with the same `APP_ENV`, `PUBLIC_ORIGIN`, and `DATABASE_PATH`:
-
-```sh
-cargo run --locked -p context7-gateway -- admin issue-enrollment
-```
+Open `http://localhost:8787/console` and `http://localhost:8787/admin/login`. Sign in to the administrator console with `GATEWAY_ADMIN_USERNAME` and `GATEWAY_ADMIN_PASSWORD`. After login, optionally bind a Passkey from **Settings -> Passkeys**; password login remains available afterwards. Use the literal hostname `localhost`, not `127.0.0.1`, when testing Passkeys.
 
 Keep `GATEWAY_ENCRYPTION_KEY` and `GATEWAY_TOKEN_PEPPER` stable across restarts; changing either value makes previously stored upstream Keys or Gateway Keys unusable.
 
@@ -48,6 +48,9 @@ For frontend hot reload, run the API with the Vite origin and then start Vite:
 # Terminal 1
 export APP_ENV=development
 export PUBLIC_ORIGIN="http://localhost:5173"
+# Set both administrator variables together, or omit both for passkey-only mode.
+export GATEWAY_ADMIN_USERNAME="admin"
+export GATEWAY_ADMIN_PASSWORD="local-development-password-change-me"
 export GATEWAY_ADMIN_TOKEN="$(openssl rand -hex 32)"
 export GATEWAY_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 export GATEWAY_TOKEN_PEPPER="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
@@ -59,7 +62,7 @@ npm ci
 npm run dev
 ```
 
-The API listens on `127.0.0.1:8787`; Vite listens on `127.0.0.1:5173` and proxies API/health/MCP paths to the backend. Open `http://localhost:5173`. Database and static paths can be changed with environment variables. Use `.env.example` as a reference; do not store real secrets in the repository. For the administrator browser console, use the one-time enrollment command in [`docs/admin-auth.md`](docs/admin-auth.md), then sign in with a Passkey at `/admin/login`. `GATEWAY_ADMIN_TOKEN` is accepted only for non-production API/bootstrap development; production startup rejects it. Configure Linux.do OAuth, the upstream pool, production secrets, and TLS separately as described in [`docs/deployment.md`](docs/deployment.md).
+The API listens on `127.0.0.1:8787`; Vite listens on `127.0.0.1:5173` and proxies API/health/MCP paths to the backend. Open `http://localhost:5173`. Database and static paths can be changed with environment variables. Use `.env.example` as a reference; do not store real secrets in the repository. For the administrator browser console, sign in at `/admin/login` with the configured username and password, then optionally bind a Passkey in Settings. The CLI enrollment flow is only for legacy passkey-only deployments; see [`docs/admin-auth.md`](docs/admin-auth.md). `GATEWAY_ADMIN_TOKEN` is accepted only for non-production API/bootstrap development; production startup rejects it. Configure Linux.do OAuth, the upstream pool, production secrets, and TLS separately as described in [`docs/deployment.md`](docs/deployment.md).
 
 ## Checks
 
@@ -82,5 +85,5 @@ cd web && npm ci && npm run build
 - [`docs/client-setup.md`](docs/client-setup.md): Gateway Key, MCP and REST usage.
 - [`docs/context7-upstream-contract.md`](docs/context7-upstream-contract.md): observed API/MCP contracts and remaining untested error cases.
 - [`docs/phase0-operator-record.md`](docs/phase0-operator-record.md): operator declaration of upstream key responsibility and the runtime registration prerequisites.
-- [`docs/admin-auth.md`](docs/admin-auth.md): Passkey onboarding/recovery.
+- [`docs/admin-auth.md`](docs/admin-auth.md): administrator password login, optional Passkeys, and recovery.
 - [`docs/quota-and-billing.md`](docs/quota-and-billing.md): quota, usage, credits, redemptions and disabled payment sandbox.

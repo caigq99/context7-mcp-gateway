@@ -261,6 +261,14 @@ code, .eyebrow, .footer-version { font-family: 'DM Mono', 'SFMono-Regular', Cons
 .admin-sign-in { max-width: 440px; }
 .admin-sign-in .sign-in-card { display: grid; gap: 11px; }
 .admin-sign-in .actions { align-items: stretch; }
+.password-form { display: grid; gap: 2px; }
+.password-form .field { margin: 3px 0; }
+.password-submit { width: 100%; min-height: 39px; margin-top: 6px; }
+.sign-in-divider { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; color: #a0a1a7; font-size: 9px; text-transform: lowercase; }
+.sign-in-divider::before, .sign-in-divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+.passkey-alternative { display: grid; gap: 3px; }
+.passkey-alternative > .button { width: 100%; }
+.passkey-alternative .sign-in-note { margin: 2px 0 0; }
 .app-footer { display: flex; gap: 7px; padding: 18px 2px 3px; color: #9a9ba1; font-size: 9px; }
 
 @media (max-width: 1020px) {

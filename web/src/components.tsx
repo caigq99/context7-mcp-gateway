@@ -71,6 +71,7 @@ const errors: Partial<Record<string, Text>> = {
   local_quota_exceeded: 'quotaExceeded',
   local_rate_limited: 'rateLimited',
   rate_limited: 'rateLimited',
+  invalid_admin_credentials: 'invalidAdminCredentials',
   passkey_failed: 'passkeyFailed',
 };
 

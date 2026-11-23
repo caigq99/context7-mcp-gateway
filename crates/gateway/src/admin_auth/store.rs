@@ -11,8 +11,8 @@ use crate::management::{ApiError, ApiErrorCode};
 
 use super::{
     CEREMONY_TTL_SECONDS, CeremonyPurpose, EnrollmentMode, MAX_PASSKEYS, PASSKEY_ACTOR,
-    PasskeySummary, RegistrationPermit, RegistrationState, SESSION_TTL_SECONDS, SecretDigest,
-    digest, internal_error, new_secret, unauthorized,
+    PASSWORD_ACTOR, PasskeySummary, RegistrationPermit, RegistrationState, SESSION_TTL_SECONDS,
+    SecretDigest, digest, internal_error, new_secret, unauthorized,
 };
 
 const ENROLLMENT_TTL_SECONDS: i64 = 15 * 60;
@@ -80,6 +80,13 @@ pub(super) async fn active_passkeys(pool: &SqlitePool) -> Result<Vec<Passkey>, A
         .collect()
 }
 
+pub(super) async fn active_passkey_count(pool: &SqlitePool) -> Result<i64, ApiError> {
+    sqlx::query_scalar("SELECT count(*) FROM admin_passkeys WHERE revoked_at IS NULL")
+        .fetch_one(pool)
+        .await
+        .map_err(db_error)
+}
+
 pub(super) async fn passkey_summaries(pool: &SqlitePool) -> Result<Vec<PasskeySummary>, ApiError> {
     let rows = sqlx::query_as::<_, (Vec<u8>, String, i64, Option<i64>)>(
         "SELECT credential_id, name, created_at, last_used_at FROM admin_passkeys \
@@ -142,6 +149,73 @@ pub(super) async fn session_credential<'e>(
     .fetch_optional(executor)
     .await
     .map_err(db_error)
+}
+
+pub(super) async fn password_session_exists(
+    pool: &SqlitePool,
+    origin: &str,
+    digest: &SecretDigest,
+    account_version: &SecretDigest,
+) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM admin_password_sessions \
+         WHERE digest = ? AND account_version = ? AND origin = ? \
+         AND expires_at > unixepoch() AND revoked_at IS NULL)",
+    )
+    .bind(digest.as_slice())
+    .bind(account_version.as_slice())
+    .bind(origin)
+    .fetch_one(pool)
+    .await
+    .map(|value| value == 1)
+    .map_err(db_error)
+}
+
+pub(super) async fn new_password_session(
+    pool: &SqlitePool,
+    origin: &str,
+    previous: Option<SecretDigest>,
+    account_version: &SecretDigest,
+) -> Result<Zeroizing<String>, ApiError> {
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await.map_err(db_error)?;
+    if let Some(previous) = previous {
+        revoke_any_session(&mut transaction, origin, &previous).await?;
+    }
+    sqlx::query(
+        "DELETE FROM admin_password_sessions WHERE expires_at <= unixepoch() OR revoked_at IS NOT NULL",
+    )
+    .execute(&mut *transaction)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "DELETE FROM admin_sessions WHERE expires_at <= unixepoch() OR revoked_at IS NOT NULL",
+    )
+    .execute(&mut *transaction)
+    .await
+    .map_err(db_error)?;
+    let secret = new_secret().map_err(|_| internal_error())?;
+    sqlx::query(
+        "INSERT INTO admin_password_sessions(digest, account_version, origin, expires_at) \
+         VALUES (?, ?, ?, unixepoch() + ?)",
+    )
+    .bind(digest(&secret).as_slice())
+    .bind(account_version.as_slice())
+    .bind(origin)
+    .bind(SESSION_TTL_SECONDS)
+    .execute(&mut *transaction)
+    .await
+    .map_err(db_error)?;
+    audit(
+        &mut transaction,
+        PASSWORD_ACTOR,
+        "admin.session.login",
+        "admin_password",
+        None,
+    )
+    .await
+    .map_err(db_error)?;
+    transaction.commit().await.map_err(db_error)?;
+    Ok(secret)
 }
 
 pub(super) async fn start_ceremony(
@@ -262,6 +336,7 @@ pub(super) async fn complete_registration(
     previous_session: Option<SecretDigest>,
     registration: &RegistrationState,
     passkey: &Passkey,
+    password_session_version: Option<&SecretDigest>,
 ) -> Result<Zeroizing<String>, ApiError> {
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await.map_err(db_error)?;
     let active = active_count(&mut transaction).await.map_err(db_error)?;
@@ -270,6 +345,27 @@ pub(super) async fn complete_registration(
             session_credential(&mut *transaction, origin, digest)
                 .await?
                 .ok_or_else(unauthorized)?;
+            if active >= MAX_PASSKEYS {
+                return Err(ApiError::new(ApiErrorCode::Conflict));
+            }
+            "admin.passkey.add"
+        }
+        RegistrationPermit::PasswordSession { digest } => {
+            let account_version = password_session_version.ok_or_else(unauthorized)?;
+            let exists = sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(SELECT 1 FROM admin_password_sessions \
+                 WHERE digest = ? AND account_version = ? AND origin = ? \
+                 AND expires_at > unixepoch() AND revoked_at IS NULL)",
+            )
+            .bind(digest.as_slice())
+            .bind(account_version.as_slice())
+            .bind(origin)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(db_error)?;
+            if exists != 1 {
+                return Err(unauthorized());
+            }
             if active >= MAX_PASSKEYS {
                 return Err(ApiError::new(ApiErrorCode::Conflict));
             }
@@ -328,12 +424,33 @@ pub(super) async fn remove_passkey(
     pool: &SqlitePool,
     origin: &str,
     session: &SecretDigest,
+    password_session_version: Option<&SecretDigest>,
+    allow_last_removal: bool,
     credential_id: &[u8],
 ) -> Result<(), ApiError> {
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await.map_err(db_error)?;
-    session_credential(&mut *transaction, origin, session)
+    let passkey_session = session_credential(&mut *transaction, origin, session)
         .await?
-        .ok_or_else(unauthorized)?;
+        .is_some();
+    let password_session = if let Some(account_version) = password_session_version {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM admin_password_sessions \
+             WHERE digest = ? AND account_version = ? AND origin = ? \
+             AND expires_at > unixepoch() AND revoked_at IS NULL)",
+        )
+        .bind(session.as_slice())
+        .bind(account_version.as_slice())
+        .bind(origin)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(db_error)?
+            == 1
+    } else {
+        false
+    };
+    if !passkey_session && !password_session {
+        return Err(unauthorized());
+    }
     let changed = sqlx::query(
         "UPDATE admin_passkeys SET revoked_at = unixepoch() WHERE credential_id = ? AND revoked_at IS NULL",
     )
@@ -344,7 +461,7 @@ pub(super) async fn remove_passkey(
     if changed.rows_affected() != 1 {
         return Err(ApiError::new(ApiErrorCode::NotFound));
     }
-    if active_count(&mut transaction).await.map_err(db_error)? == 0 {
+    if !allow_last_removal && active_count(&mut transaction).await.map_err(db_error)? == 0 {
         return Err(ApiError::new(ApiErrorCode::Conflict));
     }
     sqlx::query(
@@ -377,18 +494,28 @@ pub(super) async fn logout(
         return Ok(());
     }
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await.map_err(db_error)?;
-    if let Some(session) = session
-        && let Some(credential_id) = revoke_session(&mut transaction, origin, &session).await?
-    {
-        audit(
-            &mut transaction,
-            PASSKEY_ACTOR,
-            "admin.session.logout",
-            "admin_passkey",
-            Some(&credential_id),
-        )
-        .await
-        .map_err(db_error)?;
+    if let Some(session) = session {
+        if let Some(credential_id) = revoke_session(&mut transaction, origin, &session).await? {
+            audit(
+                &mut transaction,
+                PASSKEY_ACTOR,
+                "admin.session.logout",
+                "admin_passkey",
+                Some(&credential_id),
+            )
+            .await
+            .map_err(db_error)?;
+        } else if revoke_password_session(&mut transaction, origin, &session).await? {
+            audit(
+                &mut transaction,
+                PASSWORD_ACTOR,
+                "admin.session.logout",
+                "admin_password",
+                None,
+            )
+            .await
+            .map_err(db_error)?;
+        }
     }
     for digest in [login, registration].into_iter().flatten() {
         sqlx::query("DELETE FROM admin_ceremonies WHERE digest = ?")
@@ -413,10 +540,16 @@ async fn new_session(
     credential_id: &[u8],
 ) -> Result<Zeroizing<String>, ApiError> {
     if let Some(previous) = previous {
-        revoke_session(connection, origin, &previous).await?;
+        revoke_any_session(connection, origin, &previous).await?;
     }
     sqlx::query(
         "DELETE FROM admin_sessions WHERE expires_at <= unixepoch() OR revoked_at IS NOT NULL",
+    )
+    .execute(&mut *connection)
+    .await
+    .map_err(db_error)?;
+    sqlx::query(
+        "DELETE FROM admin_password_sessions WHERE expires_at <= unixepoch() OR revoked_at IS NOT NULL",
     )
     .execute(&mut *connection)
     .await
@@ -449,6 +582,33 @@ async fn revoke_session(
     .fetch_optional(connection)
     .await
     .map_err(db_error)
+}
+
+async fn revoke_password_session(
+    connection: &mut SqliteConnection,
+    origin: &str,
+    digest: &SecretDigest,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "UPDATE admin_password_sessions SET revoked_at = unixepoch() \
+         WHERE digest = ? AND origin = ? AND revoked_at IS NULL AND expires_at > unixepoch()",
+    )
+    .bind(digest.as_slice())
+    .bind(origin)
+    .execute(connection)
+    .await
+    .map_err(db_error)?;
+    Ok(result.rows_affected() == 1)
+}
+
+async fn revoke_any_session(
+    connection: &mut SqliteConnection,
+    origin: &str,
+    digest: &SecretDigest,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    let credential = revoke_session(connection, origin, digest).await?;
+    revoke_password_session(connection, origin, digest).await?;
+    Ok(credential)
 }
 
 async fn revoke_previous_access(connection: &mut SqliteConnection) -> Result<(), ApiError> {

@@ -1,7 +1,10 @@
 use std::{env, net::SocketAddr, path::PathBuf, str::FromStr};
 
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use url::Url;
 use zeroize::Zeroizing;
@@ -21,9 +24,81 @@ pub struct Config {
     pub encryption_key: Option<[u8; 32]>,
     pub token_pepper: Option<[u8; 32]>,
     pub admin_token_digest: Option<[u8; 32]>,
+    pub admin_password: Option<AdminPasswordConfig>,
     pub gateway_event_retention_days: u16,
     pub linuxdo_oauth: Option<LinuxDoOAuthConfig>,
     pub default_upstream_pool_id: Option<String>,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct AdminPasswordConfig {
+    pub username: String,
+    password_hash: Zeroizing<String>,
+    session_version: [u8; 32],
+}
+
+impl std::fmt::Debug for AdminPasswordConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdminPasswordConfig")
+            .field("username", &self.username)
+            .field("password_hash", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl AdminPasswordConfig {
+    pub fn verify(&self, username: &str, password: &str) -> bool {
+        let password_ok = PasswordHash::new(self.password_hash.as_str())
+            .ok()
+            .is_some_and(|hash| {
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &hash)
+                    .is_ok()
+            });
+        let username_ok = bool::from(self.username.as_bytes().ct_eq(username.as_bytes()));
+        username_ok & password_ok
+    }
+
+    pub(crate) fn session_version(&self) -> &[u8; 32] {
+        &self.session_version
+    }
+
+    pub(crate) fn build(
+        username: &str,
+        password: &str,
+        pepper: Option<&[u8; 32]>,
+        environment: Environment,
+    ) -> Result<Self, ConfigError> {
+        let username = username.trim();
+        let minimum_password_length = if environment == Environment::Production {
+            12
+        } else {
+            8
+        };
+        if username.is_empty()
+            || username.len() > 64
+            || username.chars().any(char::is_control)
+            || password.len() < minimum_password_length
+            || password.len() > 256
+            || password.chars().any(char::is_control)
+        {
+            return Err(ConfigError::InvalidAdminPassword);
+        }
+        let mut salt_bytes = [0_u8; 16];
+        getrandom::fill(&mut salt_bytes).map_err(|_| ConfigError::InvalidAdminPassword)?;
+        let salt =
+            SaltString::encode_b64(&salt_bytes).map_err(|_| ConfigError::InvalidAdminPassword)?;
+        let password_hash = Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|_| ConfigError::InvalidAdminPassword)?
+            .to_string();
+        Ok(Self {
+            username: username.to_owned(),
+            password_hash: Zeroizing::new(password_hash),
+            session_version: password_session_version(username, password, pepper)?,
+        })
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -66,6 +141,7 @@ impl std::fmt::Debug for Config {
             .field("encryption_key_configured", &self.encryption_key.is_some())
             .field("token_pepper_configured", &self.token_pepper.is_some())
             .field("admin_token_configured", &self.admin_token_digest.is_some())
+            .field("admin_password_configured", &self.admin_password.is_some())
             .field(
                 "gateway_event_retention_days",
                 &self.gateway_event_retention_days,
@@ -117,6 +193,10 @@ pub enum ConfigError {
     MissingProductionSecrets,
     #[error("GATEWAY_ADMIN_TOKEN is only available in development and test")]
     ProductionAdminBearer,
+    #[error(
+        "GATEWAY_ADMIN_USERNAME and GATEWAY_ADMIN_PASSWORD must be set together; username is 1-64 characters and password must be 8+ characters (12+ in production)"
+    )]
+    InvalidAdminPassword,
     #[error("LINUXDO_OAUTH_ENABLED must be true or false")]
     InvalidOAuthEnabled,
     #[error("Linux.do OAuth requires client ID, client secret, redirect URL, and HTTPS endpoints")]
@@ -150,6 +230,10 @@ impl Config {
                 || (self.environment != Environment::Production
                     && self.public_origin.scheme() == "http"
                     && self.public_origin.domain() == Some("localhost")))
+    }
+
+    pub fn admin_password_enabled(&self) -> bool {
+        self.admin_password.is_some()
     }
 
     fn from_lookup(mut get: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
@@ -219,6 +303,22 @@ impl Config {
                 }
             })
             .transpose()?;
+        let admin_username = get("GATEWAY_ADMIN_USERNAME")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let admin_password = get("GATEWAY_ADMIN_PASSWORD")
+            .filter(|value| !value.is_empty())
+            .map(Zeroizing::new);
+        let admin_password = match (admin_username, admin_password) {
+            (Some(username), Some(password)) => Some(AdminPasswordConfig::build(
+                &username,
+                password.as_str(),
+                token_pepper.as_ref(),
+                environment,
+            )?),
+            (None, None) => None,
+            _ => return Err(ConfigError::InvalidAdminPassword),
+        };
 
         let default_upstream_pool_id = get("DEFAULT_UPSTREAM_POOL_ID")
             .map(|value| value.trim().to_owned())
@@ -258,6 +358,7 @@ impl Config {
             encryption_key,
             token_pepper,
             admin_token_digest,
+            admin_password,
             gateway_event_retention_days,
             linuxdo_oauth,
             default_upstream_pool_id,
@@ -361,6 +462,21 @@ fn decode_32_byte_secret(raw: &str) -> Result<[u8; 32], ConfigError> {
     decoded
         .try_into()
         .map_err(|_| ConfigError::InvalidCryptographicSecret)
+}
+
+fn password_session_version(
+    username: &str,
+    password: &str,
+    pepper: Option<&[u8; 32]>,
+) -> Result<[u8; 32], ConfigError> {
+    let key = pepper.map_or(&[][..], |pepper| pepper.as_slice());
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key).map_err(|_| ConfigError::InvalidAdminPassword)?;
+    mac.update(b"context7-gateway-admin-password-v1\0");
+    mac.update(username.as_bytes());
+    mac.update(b"\0");
+    mac.update(password.as_bytes());
+    Ok(mac.finalize().into_bytes().into())
 }
 
 fn parse_public_origin(raw: &str) -> Result<Url, ConfigError> {
@@ -518,6 +634,51 @@ mod tests {
         let debug = format!("{loaded:?}");
         assert!(!debug.contains("this-is-a-long-admin-bootstrap-token-secret"));
         assert!(!debug.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+    }
+
+    #[test]
+    fn administrator_password_login_requires_a_username_and_password_pair() {
+        let loaded = config(&[
+            ("GATEWAY_ADMIN_USERNAME", "admin"),
+            ("GATEWAY_ADMIN_PASSWORD", "correct-horse"),
+            (
+                "GATEWAY_TOKEN_PEPPER",
+                "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            ),
+        ])
+        .expect("development password login configuration is valid");
+        let admin = loaded
+            .admin_password
+            .as_ref()
+            .expect("administrator password is configured");
+        assert!(admin.verify("admin", "correct-horse"));
+        assert!(!admin.verify("admin", "wrong-password"));
+        assert!(!admin.verify("other", "correct-horse"));
+        let debug = format!("{admin:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("correct-horse"));
+
+        assert_eq!(
+            config(&[("GATEWAY_ADMIN_USERNAME", "admin")]),
+            Err(ConfigError::InvalidAdminPassword)
+        );
+        assert_eq!(
+            config(&[("GATEWAY_ADMIN_PASSWORD", "correct-horse")]),
+            Err(ConfigError::InvalidAdminPassword)
+        );
+    }
+
+    #[test]
+    fn production_administrator_password_requires_twelve_characters() {
+        assert_eq!(
+            config(&[
+                ("APP_ENV", "production"),
+                ("PUBLIC_ORIGIN", "https://gateway.example"),
+                ("GATEWAY_ADMIN_USERNAME", "admin"),
+                ("GATEWAY_ADMIN_PASSWORD", "short-pass"),
+            ]),
+            Err(ConfigError::InvalidAdminPassword)
+        );
     }
 
     #[test]

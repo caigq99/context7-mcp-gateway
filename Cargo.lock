@@ -475,6 +475,7 @@ name = "context7-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "async-stream",
  "axum",
  "base64 0.22.1",

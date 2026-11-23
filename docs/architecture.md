@@ -15,7 +15,7 @@ MCP / Context7 read-only REST client
   -> exactly-once usage/credit settlement, with legacy event resume mapping
 
 React/Vite static client console       React/Vite administrator console
-Linux.do Connect OAuth + user cookie  WebAuthn Passkeys + admin-only cookie
+Linux.do Connect OAuth + user cookie  Password login + optional WebAuthn + admin-only cookie
 SQLite single-node migrations: accounts, keys, sessions, quota, orders, audit
 ```
 
@@ -24,7 +24,7 @@ SQLite single-node migrations: accounts, keys, sessions, quota, orders, audit
 - Every user is assigned to a single upstream pool. A downstream Gateway Key cannot choose its account, pool, Context7 key or upstream host.
 - Operator Context7 keys are AEAD-encrypted at rest and bound to their pool/key identifiers. The test key itself and all key material are absent from the repository, UI response bodies, logs and usage records.
 - Gateway keys use high-entropy secrets whose HMAC-SHA-256 digests are stored with an independent server pepper. Lists show non-secret prefixes and scopes; create/rotate shows the raw value one time. Scope, expiry, token revocation and account disable are enforced before proxying.
-- User login uses OAuth state, an HttpOnly SameSite cookie and PKCE; self-registration is closed by default. Production administration uses independent Passkey sessions, origin-checked ceremonies and a host CLI one-time enrollment/recovery code. Production rejects the development-only admin bearer.
+- User login uses OAuth state, an HttpOnly SameSite cookie and PKCE; self-registration is closed by default. Administrator login defaults to the environment-configured username/password pair, with an Argon2id in-memory hash and version-bound password sessions. Passkeys are optional WebAuthn credentials bound after login; passkey-only deployments retain the host CLI enrollment/recovery flow. Production rejects the development-only admin bearer.
 - Browser mutations require same-origin checks; public client proxy calls use an Authorization bearer instead of browser cookies. API responses are no-store. Authorization, Cookie, query text, MCP body and response content are not added to HTTP logs.
 
 ## Proxy contract

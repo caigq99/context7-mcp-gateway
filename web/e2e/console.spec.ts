@@ -51,7 +51,9 @@ test.beforeEach(async ({ page }) => {
     if (path === '/api/user/service-status') return json({ status: 'available', active_tokens: 1 });
     if (path === '/api/user/setup-guides') return json({ origin: 'https://gateway.example.test', mcp_url: 'https://gateway.example.test/mcp', rest_origin: 'https://gateway.example.test/api/context7', token_env: 'GATEWAY_API_KEY' });
     if (path === '/api/user/announcements') return json([{ id: 'notice-1', title: 'Maintenance', body: 'Brief gateway update', enabled: true, created_at: '2026-11-21T00:00:00Z', ends_at: null }]);
-    if (path === '/api/admin/auth/session') return json({ authenticated: true, passkey_available: true });
+    if (path === '/api/admin/auth/session') return json({
+      authenticated: true, password_login_available: true, passkey_available: true, passkey_login_available: true,
+    });
     if (path === '/api/admin/auth/passkeys') return json([{ id: 'passkey-1', name: 'Laptop key', created_at: 1795219200, last_used_at: null }]);
     if (path === '/api/admin/pools' && method === 'GET') return json([pool]);
     if (path === '/api/admin/pools/pool-1/keys') return json([upstreamKey]);
@@ -98,7 +100,7 @@ test('admin registration unwraps the WebAuthn publicKey envelope', async ({ page
   await page.route('**/api/admin/auth/session', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ authenticated: false, passkey_available: true }),
+    body: JSON.stringify({ authenticated: false, password_login_available: false, passkey_available: true, passkey_login_available: false }),
   }));
   await page.route('**/api/admin/auth/register/start', (route) => route.fulfill({
     status: 200,
@@ -121,7 +123,7 @@ test('admin registration unwraps the WebAuthn publicKey envelope', async ({ page
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ authenticated: true, passkey_available: true }),
+      body: JSON.stringify({ authenticated: true, password_login_available: false, passkey_available: true, passkey_login_available: true }),
     });
   });
 
@@ -137,6 +139,96 @@ test('admin registration unwraps the WebAuthn publicKey envelope', async ({ page
   expect(finishBody?.credential.response.clientDataJSON).toEqual(expect.any(String));
   await expect(dialog).toHaveCount(0);
   await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId });
+});
+
+test('admin password login is the default and refreshes the session', async ({ page }) => {
+  let loggedIn = false;
+  let loginMethod = '';
+  let loginBody: unknown = null;
+  const session = {
+    authenticated: false,
+    password_login_available: true,
+    passkey_available: true,
+    passkey_login_available: true,
+  };
+  await page.route('**/api/admin/auth/session', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ...session, authenticated: loggedIn }),
+  }));
+  await page.route('**/api/admin/auth/password/login', async (route) => {
+    loginMethod = route.request().method();
+    loginBody = route.request().postDataJSON();
+    loggedIn = true;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ...session, authenticated: true }),
+    });
+  });
+
+  await page.goto('/admin/login');
+  const username = page.getByLabel('Administrator username');
+  const password = page.getByLabel('Password', { exact: true });
+  await expect(username).toBeFocused();
+  await expect(username).toHaveAttribute('autocomplete', 'username');
+  await expect(password).toHaveAttribute('autocomplete', 'current-password');
+  await expect(page.getByRole('button', { name: 'Sign in with passkey' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Register a passkey' })).toHaveCount(0);
+
+  await username.fill('gateway-admin');
+  await password.fill('correct horse battery staple');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+
+  await expect.poll(() => loginBody).toEqual({ username: 'gateway-admin', password: 'correct horse battery staple' });
+  expect(loginMethod).toBe('POST');
+  await expect(page).toHaveURL(/\/admin\/dashboard$/);
+  await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+});
+
+test('admin password login reports invalid credentials', async ({ page }) => {
+  let attempts = 0;
+  await page.route('**/api/admin/auth/session', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ authenticated: false, password_login_available: true, passkey_available: true, passkey_login_available: false }),
+  }));
+  await page.route('**/api/admin/auth/password/login', (route) => {
+    attempts += 1;
+    return route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'invalid_admin_credentials' }),
+    });
+  });
+
+  await page.goto('/admin/login');
+  await page.getByLabel('Administrator username').fill('gateway-admin');
+  await page.getByLabel('Password', { exact: true }).fill('wrong-password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+
+  await expect(page.getByRole('alert')).toContainText('Incorrect administrator username or password.');
+  await expect.poll(() => attempts).toBe(1);
+});
+
+test('the last passkey is removable only while password login is available', async ({ page }) => {
+  let passwordAvailable = true;
+  await page.route('**/api/admin/auth/session', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      authenticated: true, password_login_available: passwordAvailable, passkey_available: true, passkey_login_available: true,
+    }),
+  }));
+
+  await page.goto('/admin/settings');
+  const remove = page.getByRole('button', { name: 'Remove' });
+  await expect(remove).toHaveCount(1);
+  await expect(remove).toBeEnabled();
+
+  passwordAvailable = false;
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Remove' })).toBeDisabled();
 });
 
 test('overview renders real quota status, usage and request activity', async ({ page }) => {

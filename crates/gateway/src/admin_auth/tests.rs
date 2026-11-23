@@ -14,15 +14,20 @@ use tower::ServiceExt;
 use url::Url;
 use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
 
-use super::{CookieKind, EnrollmentMode, authorize_admin, issue_enrollment_ticket, routes};
+use super::{
+    CookieKind, EnrollmentMode, authorize_admin, issue_enrollment_ticket, reset_password_failures,
+    routes,
+};
 use crate::{
-    config::{Config, Environment},
+    config::{AdminPasswordConfig, Config, Environment},
     management::AppState,
     storage,
 };
 
 const ORIGIN: &str = "https://gateway.example";
 const ADMIN_BEARER: &str = "long-development-test-token-for-management";
+const ADMIN_USERNAME: &str = "admin";
+const ADMIN_PASSWORD: &str = "correct-horse-battery-staple";
 
 struct TestGateway {
     state: Arc<AppState>,
@@ -31,6 +36,19 @@ struct TestGateway {
 
 impl TestGateway {
     async fn new() -> Self {
+        Self::new_with_password(false).await
+    }
+
+    async fn new_with_password(password_enabled: bool) -> Self {
+        let admin_password = password_enabled.then(|| {
+            AdminPasswordConfig::build(
+                ADMIN_USERNAME,
+                ADMIN_PASSWORD,
+                Some(&[2; 32]),
+                Environment::Production,
+            )
+            .expect("test administrator password hashes")
+        });
         let state = Arc::new(AppState {
             config: Arc::new(Config {
                 bind_addr: "127.0.0.1:8787".parse().expect("valid socket address"),
@@ -45,6 +63,7 @@ impl TestGateway {
                 encryption_key: Some([1; 32]),
                 token_pepper: Some([2; 32]),
                 admin_token_digest: Some(super::digest(ADMIN_BEARER)),
+                admin_password,
                 gateway_event_retention_days: 30,
                 linuxdo_oauth: None,
                 default_upstream_pool_id: None,
@@ -437,4 +456,171 @@ async fn development_bearer_and_user_cookie_cannot_authorize_production_administ
             .expect("administrator can access management"),
         "passkey-admin"
     );
+}
+
+#[tokio::test]
+async fn password_login_is_default_and_can_bind_optional_passkeys() {
+    reset_password_failures();
+    let gateway = TestGateway::new_with_password(true).await;
+    let initial = gateway
+        .request("GET", "/session", ORIGIN, &[], Value::Null)
+        .await;
+    let initial = body_json(initial).await;
+    assert_eq!(initial["authenticated"], false);
+    assert_eq!(initial["password_login_available"], true);
+    assert_eq!(initial["passkey_login_available"], false);
+
+    let malformed = gateway
+        .request(
+            "POST",
+            "/password/login",
+            ORIGIN,
+            &[],
+            json!({"username": ADMIN_USERNAME, "password": [ADMIN_PASSWORD]}),
+        )
+        .await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    let malformed = body_json(malformed).await;
+    assert_eq!(malformed["error"], "invalid_request");
+    assert!(!malformed.to_string().contains(ADMIN_PASSWORD));
+
+    let wrong_origin = gateway
+        .request(
+            "POST",
+            "/password/login",
+            "https://elsewhere.example",
+            &[],
+            json!({"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}),
+        )
+        .await;
+    assert_eq!(wrong_origin.status(), StatusCode::FORBIDDEN);
+
+    let wrong = gateway
+        .request(
+            "POST",
+            "/password/login",
+            ORIGIN,
+            &[],
+            json!({"username": ADMIN_USERNAME, "password": "wrong-password"}),
+        )
+        .await;
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(wrong).await["error"], "invalid_admin_credentials");
+
+    let success = gateway
+        .request(
+            "POST",
+            "/password/login",
+            ORIGIN,
+            &[],
+            json!({"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}),
+        )
+        .await;
+    assert_eq!(success.status(), StatusCode::OK);
+    let password_session = cookie(&success, CookieKind::Session);
+    assert!(gateway.session_authenticated(&password_session).await);
+    let raw_password_session = password_session
+        .split(';')
+        .next()
+        .and_then(|cookie| cookie.split_once('='))
+        .expect("session cookie has a value")
+        .1;
+    let password_session_digest = super::digest(raw_password_session);
+    let current_version = gateway
+        .state
+        .config
+        .admin_password
+        .as_ref()
+        .expect("password login configured")
+        .session_version();
+    assert!(
+        super::store::password_session_exists(
+            &gateway.state.pool,
+            gateway.state.config.public_origin.as_str(),
+            &password_session_digest,
+            current_version,
+        )
+        .await
+        .expect("password session lookup succeeds")
+    );
+    assert!(
+        !super::store::password_session_exists(
+            &gateway.state.pool,
+            gateway.state.config.public_origin.as_str(),
+            &password_session_digest,
+            &[9; 32],
+        )
+        .await
+        .expect("password session lookup succeeds")
+    );
+
+    let mut authenticator = SoftPasskey::new(true);
+    let passkey_session = gateway
+        .register(&mut authenticator, None, Some(&password_session))
+        .await;
+    assert!(gateway.session_authenticated(&passkey_session).await);
+    let entries = gateway
+        .request("GET", "/passkeys", ORIGIN, &[&passkey_session], Value::Null)
+        .await;
+    let entries = body_json(entries).await;
+    assert_eq!(entries.as_array().expect("passkey list").len(), 1);
+
+    let success = gateway
+        .request(
+            "POST",
+            "/password/login",
+            ORIGIN,
+            &[],
+            json!({"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}),
+        )
+        .await;
+    assert_eq!(success.status(), StatusCode::OK);
+    let password_session = cookie(&success, CookieKind::Session);
+    let passkey_id = entries[0]["id"].as_str().expect("passkey id");
+    let removed = gateway
+        .request(
+            "DELETE",
+            &format!("/passkeys/{passkey_id}"),
+            ORIGIN,
+            &[&password_session],
+            Value::Null,
+        )
+        .await;
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert!(gateway.session_authenticated(&password_session).await);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM admin_passkeys WHERE revoked_at IS NULL"
+        )
+        .fetch_one(&gateway.state.pool)
+        .await
+        .expect("count active passkeys"),
+        0
+    );
+
+    reset_password_failures();
+    for _ in 0..5 {
+        let wrong = gateway
+            .request(
+                "POST",
+                "/password/login",
+                ORIGIN,
+                &[],
+                json!({"username": ADMIN_USERNAME, "password": "wrong-password"}),
+            )
+            .await;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    }
+    let limited = gateway
+        .request(
+            "POST",
+            "/password/login",
+            ORIGIN,
+            &[],
+            json!({"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}),
+        )
+        .await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(limited.headers().contains_key(header::RETRY_AFTER));
+    reset_password_failures();
 }
