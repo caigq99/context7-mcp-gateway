@@ -59,6 +59,7 @@ export type GatewayToken = {
   last_used_at?: string | null;
   expires_at?: string | null;
   scopes?: GatewayScope[];
+  can_copy?: boolean;
 };
 
 export type GatewayScope = 'mcp' | 'context7:read';

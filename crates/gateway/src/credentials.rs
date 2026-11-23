@@ -78,16 +78,49 @@ impl CredentialCipher {
         if api_key.trim().is_empty() || api_key.chars().any(char::is_control) {
             return Err(CredentialError::InvalidUpstreamKey);
         }
+        self.seal(&associated_data(key_id, pool_id), api_key.as_bytes())
+    }
+
+    pub fn decrypt(
+        &self,
+        key_id: &UpstreamKeyId,
+        pool_id: &PoolId,
+        encrypted: &EncryptedCredential,
+    ) -> Result<String, CredentialError> {
+        let plaintext = self.open(&associated_data(key_id, pool_id), encrypted)?;
+        String::from_utf8(plaintext).map_err(|_| CredentialError::CryptographicFailure)
+    }
+
+    pub fn encrypt_gateway_token(
+        &self,
+        token_id: &GatewayTokenId,
+        token: &str,
+    ) -> Result<EncryptedCredential, CredentialError> {
+        if token.is_empty() {
+            return Err(CredentialError::InvalidGatewayToken);
+        }
+        self.seal(&gateway_token_associated_data(token_id), token.as_bytes())
+    }
+
+    pub fn decrypt_gateway_token(
+        &self,
+        token_id: &GatewayTokenId,
+        encrypted: &EncryptedCredential,
+    ) -> Result<String, CredentialError> {
+        let plaintext = self.open(&gateway_token_associated_data(token_id), encrypted)?;
+        String::from_utf8(plaintext).map_err(|_| CredentialError::CryptographicFailure)
+    }
+
+    fn seal(&self, aad: &[u8], plaintext: &[u8]) -> Result<EncryptedCredential, CredentialError> {
         let cipher = ChaCha20Poly1305::new((&self.key).into());
         let mut nonce_bytes = [0_u8; 12];
         getrandom::fill(&mut nonce_bytes).map_err(|_| CredentialError::RandomnessUnavailable)?;
-        let aad = associated_data(key_id, pool_id);
         let ciphertext = cipher
             .encrypt(
                 Nonce::from_slice(&nonce_bytes),
                 Payload {
-                    msg: api_key.as_bytes(),
-                    aad: &aad,
+                    msg: plaintext,
+                    aad,
                 },
             )
             .map_err(|_| CredentialError::CryptographicFailure)?;
@@ -97,24 +130,21 @@ impl CredentialCipher {
         })
     }
 
-    pub fn decrypt(
+    fn open(
         &self,
-        key_id: &UpstreamKeyId,
-        pool_id: &PoolId,
+        aad: &[u8],
         encrypted: &EncryptedCredential,
-    ) -> Result<String, CredentialError> {
+    ) -> Result<Vec<u8>, CredentialError> {
         let cipher = ChaCha20Poly1305::new((&self.key).into());
-        let aad = associated_data(key_id, pool_id);
-        let plaintext = cipher
+        cipher
             .decrypt(
                 Nonce::from_slice(&encrypted.nonce),
                 Payload {
                     msg: &encrypted.ciphertext,
-                    aad: &aad,
+                    aad,
                 },
             )
-            .map_err(|_| CredentialError::CryptographicFailure)?;
-        String::from_utf8(plaintext).map_err(|_| CredentialError::CryptographicFailure)
+            .map_err(|_| CredentialError::CryptographicFailure)
     }
 }
 
@@ -124,6 +154,10 @@ fn associated_data(key_id: &UpstreamKeyId, pool_id: &PoolId) -> Vec<u8> {
         pool_id.0, key_id.0
     )
     .into_bytes()
+}
+
+fn gateway_token_associated_data(token_id: &GatewayTokenId) -> Vec<u8> {
+    format!("context7-gateway/gateway-token/v1/{}", token_id.0).into_bytes()
 }
 
 pub fn issue_gateway_token(
@@ -188,8 +222,8 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        CredentialCipher, CredentialError, PoolId, UpstreamKeyId, issue_gateway_token,
-        parse_gateway_token, verify_gateway_token,
+        CredentialCipher, CredentialError, GatewayTokenId, PoolId, UpstreamKeyId,
+        issue_gateway_token, parse_gateway_token, verify_gateway_token,
     };
 
     #[test]
@@ -222,6 +256,23 @@ mod tests {
         assert_eq!(
             cipher.encrypt(&key_id, &pool_id, "abc\r\nAuthorization: x"),
             Err(CredentialError::InvalidUpstreamKey)
+        );
+    }
+
+    #[test]
+    fn gateway_token_ciphertext_round_trips_and_is_bound_to_its_id() {
+        let cipher = CredentialCipher::new(Some([9; 32])).expect("cipher key is configured");
+        let token_id = GatewayTokenId("token-a".to_owned());
+        let encrypted = cipher
+            .encrypt_gateway_token(&token_id, "c7g_token-a.secret")
+            .expect("gateway token encrypts");
+        assert_eq!(
+            cipher.decrypt_gateway_token(&token_id, &encrypted),
+            Ok("c7g_token-a.secret".to_owned())
+        );
+        assert_eq!(
+            cipher.decrypt_gateway_token(&GatewayTokenId("token-b".to_owned()), &encrypted),
+            Err(CredentialError::CryptographicFailure)
         );
     }
 

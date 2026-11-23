@@ -24,7 +24,7 @@ const event = {
   upstream_status: 200, success_units: 2, failure_code: null,
 };
 const baseToken = {
-  id: 'token-1', name: 'Codex', prefix: 'c7gw_abc…', status: 'active',
+  id: 'token-1', name: 'Codex', prefix: 'c7gw_abc', status: 'active', can_copy: true,
   created_at: '2026-11-20T00:00:00Z', last_used_at: null, expires_at: null,
   scopes: ['mcp', 'context7:read'],
 };
@@ -39,6 +39,7 @@ test.beforeEach(async ({ page }) => {
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     if (path === '/api/user/me') return json({ user });
     if (path === '/api/user/tokens' || path === '/api/admin/users/user-1/tokens') return json([baseToken]);
+    if (path === '/api/user/tokens/token-1/secret') return json({ token: 'c7gw_abc.full_secret_value' });
     if (path === '/api/user/initial-token' && method === 'GET') return route.fulfill({ status: 204 });
     if (path === '/api/user/initial-token/acknowledge' && method === 'POST') return route.fulfill({ status: 204 });
     if (path === '/api/user/usage/summary') return json({ plan, windows: {
@@ -247,24 +248,31 @@ test('registration-issued API key is revealed once and acknowledged', async ({ p
   await page.route('**/api/user/initial-token', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ token: 'c7g_autoissued_one_time_secret', name: 'Initial API key' }),
+    body: JSON.stringify({ token: 'c7g_autoissued.one_time_secret', name: 'Initial API key' }),
   }));
   await page.route('**/api/user/initial-token/acknowledge', async (route) => {
     acknowledged = true;
     await route.fulfill({ status: 204 });
   });
   await page.goto('/console/dashboard');
-  await expect(page.getByRole('dialog')).toContainText('c7g_autoissued_one_time_secret');
+  await expect(page.getByRole('dialog')).toContainText('c7g_autoissued••••••••');
+  await expect(page.getByRole('dialog')).not.toContainText('c7g_autoissued.one_time_secret');
   await page.getByRole('dialog').getByRole('button', { name: 'Copy' }).click();
   await expect(page.getByRole('dialog')).toContainText('Copied');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('c7g_autoissued.one_time_secret');
   await page.getByRole('dialog').getByRole('button', { name: 'I saved the key' }).click();
   await expect.poll(() => acknowledged).toBe(true);
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
-test('user token page is read-only', async ({ page }) => {
+test('user token page is read-only', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.goto('/console/tokens');
-  await expect(page.getByText('c7gw_abc…')).toBeVisible();
+  await expect(page.getByText('c7gw_abc••••••••')).toBeVisible();
+  await expect(page.getByText('c7gw_abc.full_secret_value')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Copy' }).click();
+  await expect(page.getByRole('button', { name: 'Copied' })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('c7gw_abc.full_secret_value');
   await expect(page.getByRole('button', { name: 'Create API key' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Rotate' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Revoke' })).toHaveCount(0);

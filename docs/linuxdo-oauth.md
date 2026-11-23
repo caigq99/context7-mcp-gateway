@@ -75,7 +75,7 @@ http://localhost:8787/admin/login
 
 进入 **Settings**，打开 **User registration**。后端会再次检查 OAuth、默认 Pool 和加密配置；检查失败时不会打开注册，并返回 `not_configured`。
 
-关闭注册只阻止新用户自动创建；已经绑定过 Linux.do 身份的现有用户可以继续登录。新用户首次通过 OAuth 注册时，Gateway 自动签发一把默认包含 MCP 与 REST scope 的 API Key，并在进入用户控制台后通过 5 分钟有效的 HttpOnly 交付 Cookie 一次性展示；用户端不能自行创建、轮换或撤销 API Key。管理员也可以保持注册关闭，只在 **Users** 中为已批准用户签发 Gateway Key。
+关闭注册只阻止新用户自动创建；已经绑定过 Linux.do 身份的现有用户可以继续登录。新用户首次通过 OAuth 注册时，Gateway 自动签发一把默认包含 MCP 与 REST scope 的 API Key。用户控制台始终只显示掩码，点击复制按钮时才由后端解密并写入剪贴板；用户端不能自行创建、轮换或撤销 API Key。管理员也可以保持注册关闭，只在 **Users** 中为已批准用户签发 Gateway Key。
 
 ## 5. 验证登录
 

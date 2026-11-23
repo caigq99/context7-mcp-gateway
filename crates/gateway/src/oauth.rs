@@ -13,7 +13,10 @@ use zeroize::Zeroizing;
 
 use crate::{
     config::LinuxDoOAuthConfig,
-    credentials::{issue_gateway_token, parse_gateway_token, verify_gateway_token},
+    credentials::{
+        CredentialCipher, EncryptedCredential, GatewayTokenId, issue_gateway_token,
+        parse_gateway_token, verify_gateway_token,
+    },
     management::{
         ApiError, ApiErrorCode, AppState, GatewayTokenScope, encode_scopes, map_database_error,
         write_audit,
@@ -64,6 +67,7 @@ pub struct UserGatewayToken {
     pub last_used_at: Option<String>,
     pub expires_at: Option<String>,
     pub scopes: Vec<GatewayTokenScope>,
+    pub can_copy: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,7 +241,7 @@ pub async fn list_tokens(
 ) -> Result<Json<Vec<UserGatewayToken>>, ApiError> {
     let user = authenticate_browser_session(&state, &headers).await?;
     let rows = sqlx::query_as::<_, UserGatewayTokenRow>(
-        "SELECT id, prefix, name, CASE WHEN status = 'active' AND unixepoch(expires_at) <= unixepoch() THEN 'expired' ELSE status END AS status, created_at, last_used_at, expires_at, scopes_json FROM gateway_tokens WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT id, prefix, name, CASE WHEN status = 'active' AND unixepoch(expires_at) <= unixepoch() THEN 'expired' ELSE status END AS status, created_at, last_used_at, expires_at, scopes_json, CASE WHEN token_ciphertext IS NOT NULL AND status = 'active' AND (expires_at IS NULL OR unixepoch(expires_at) > unixepoch()) THEN 1 ELSE 0 END AS can_copy FROM gateway_tokens WHERE user_id = ? ORDER BY created_at DESC",
     )
     .bind(&user.id)
     .fetch_all(&state.pool)
@@ -254,6 +258,7 @@ pub async fn list_tokens(
                 last_used_at: row.last_used_at,
                 expires_at: row.expires_at,
                 scopes: serde_json::from_str(&row.scopes_json).unwrap_or_default(),
+                can_copy: row.can_copy,
                 token: None,
             })
             .collect(),
@@ -319,6 +324,45 @@ pub async fn acknowledge_initial_token(
     Ok((StatusCode::NO_CONTENT, response_headers))
 }
 
+#[derive(Serialize)]
+pub struct CopiedGatewayToken {
+    token: String,
+}
+
+pub async fn copy_token(
+    State(state): State<AppState>,
+    Path(token_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<CopiedGatewayToken>, ApiError> {
+    let user = authenticate_browser_session(&state, &headers).await?;
+    let row = sqlx::query_as::<_, (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>)>(
+        "SELECT token_ciphertext, token_nonce, token_encryption_version \
+         FROM gateway_tokens WHERE id = ? AND user_id = ? AND status = 'active' \
+         AND (expires_at IS NULL OR unixepoch(expires_at) > unixepoch())",
+    )
+    .bind(&token_id)
+    .bind(&user.id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|_| ApiError::new(ApiErrorCode::InternalError))?
+    .ok_or_else(|| ApiError::new(ApiErrorCode::NotFound))?;
+    let (Some(ciphertext), Some(nonce), Some(1)) = row else {
+        return Err(ApiError::new(ApiErrorCode::NotFound));
+    };
+    let nonce = nonce
+        .try_into()
+        .map_err(|_| ApiError::new(ApiErrorCode::NotFound))?;
+    let cipher = CredentialCipher::new(state.config.encryption_key)
+        .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
+    let token = cipher
+        .decrypt_gateway_token(
+            &GatewayTokenId(token_id),
+            &EncryptedCredential { nonce, ciphertext },
+        )
+        .map_err(|_| ApiError::new(ApiErrorCode::NotFound))?;
+    Ok(Json(CopiedGatewayToken { token }))
+}
+
 pub async fn create_token(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -355,6 +399,7 @@ pub async fn create_token(
             last_used_at: None,
             expires_at: row.expires_at,
             scopes: serde_json::from_str(&row.scopes_json).unwrap_or_default(),
+            can_copy: false,
         }),
     ))
 }
@@ -387,6 +432,7 @@ struct UserGatewayTokenRow {
     last_used_at: Option<String>,
     expires_at: Option<String>,
     scopes_json: String,
+    can_copy: bool,
 }
 
 pub async fn rotate_token(
@@ -439,6 +485,7 @@ pub async fn rotate_token(
             last_used_at: None,
             expires_at: prior.2,
             scopes: serde_json::from_str(&prior.1).unwrap_or_default(),
+            can_copy: false,
         }),
     ))
 }
@@ -624,10 +671,15 @@ async fn ensure_initial_gateway_token(
     }
     let issued = issue_gateway_token(state.config.token_pepper)
         .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
+    let cipher = crate::credentials::CredentialCipher::new(state.config.encryption_key)
+        .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
+    let encrypted = cipher
+        .encrypt_gateway_token(&issued.id, &issued.raw_token)
+        .map_err(|_| ApiError::new(ApiErrorCode::InternalError))?;
     let scopes = encode_scopes(None)?;
     sqlx::query(
-        "INSERT INTO gateway_tokens(id, user_id, token_digest, prefix, name, scopes_json) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO gateway_tokens(id, user_id, token_digest, prefix, name, scopes_json, token_ciphertext, token_nonce, token_encryption_version) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
     )
     .bind(&issued.id.0)
     .bind(user_id)
@@ -635,6 +687,8 @@ async fn ensure_initial_gateway_token(
     .bind(&issued.prefix)
     .bind("Initial API key")
     .bind(scopes)
+    .bind(encrypted.ciphertext)
+    .bind(encrypted.nonce.to_vec())
     .execute(&mut *connection)
     .await
     .map_err(map_database_error)?;
@@ -795,8 +849,8 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::{
-        CallbackQuery, CurrentSession, acknowledge_initial_token, callback, initial_token,
-        list_tokens, login, logout, me,
+        CallbackQuery, CurrentSession, acknowledge_initial_token, callback, copy_token,
+        initial_token, list_tokens, login, logout, me,
     };
     use crate::{
         config::{Config, Environment, LinuxDoOAuthConfig},
@@ -1054,6 +1108,7 @@ mod tests {
             .0;
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "Initial API key");
+        assert!(listed[0].can_copy);
         assert_eq!(
             listed[0].scopes,
             vec![GatewayTokenScope::Mcp, GatewayTokenScope::ContextRead]
@@ -1062,6 +1117,14 @@ mod tests {
             listed[0].token.is_none(),
             "list must not return the raw secret"
         );
+        let copied = copy_token(
+            State(state.clone()),
+            axum::extract::Path(listed[0].id.clone()),
+            cookie_headers.clone(),
+        )
+        .await
+        .expect("encrypted Gateway token can be copied");
+        assert_eq!(copied.0.token, initial_token_value);
         let initial_headers = HeaderMap::from_iter([(
             header::COOKIE,
             HeaderValue::from_str(&format!(

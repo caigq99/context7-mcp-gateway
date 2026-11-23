@@ -14,6 +14,8 @@ type InitialToken = { token: string; name: string };
 export function InitialTokenNotice() {
   const { t } = useLanguage();
   const [issued, setIssued] = useState<InitialToken | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   useEffect(() => {
     let active = true;
     void api<InitialToken | undefined>('/api/user/initial-token')
@@ -22,13 +24,26 @@ export function InitialTokenNotice() {
     return () => { active = false; };
   }, []);
   if (!issued) return null;
+  const copy = async () => {
+    setCopyError(false);
+    try {
+      await navigator.clipboard.writeText(issued.token);
+      setCopied(true);
+    } catch {
+      setCopyError(true);
+    }
+  };
   const acknowledge = () => {
     void api<void>('/api/user/initial-token/acknowledge', { method: 'POST' })
       .finally(() => setIssued(null));
   };
   return <Dialog title={t('initialKeyTitle')} onClose={acknowledge}>
     <p>{t('initialKeyHelp')}</p>
-    <CopyBlock text={issued.token} label={t('key')} />
+    <div className="code-inline">
+      <code>{maskToken(issued.token)}</code>
+      <button type="button" className="button button-sm" onClick={() => void copy()}>{t(copied ? 'copied' : 'copy')}</button>
+    </div>
+    {copyError && <p className="quota-warning" role="alert">{t('copyFailed')}</p>}
     <div className="actions modal-actions">
       <button type="button" className="button button-primary" onClick={acknowledge}>{t('initialKeySaved')}</button>
     </div>
@@ -51,6 +66,9 @@ export function TokenManager({ path, detailId, selfService = false, readOnly = f
   const { t } = useLanguage();
   const tokens = useResource<GatewayToken[]>(path);
   const [action, setAction] = useState<TokenAction | null>(null);
+  const [copyingId, setCopyingId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState(false);
   function reveal(token: GatewayToken) {
     tokens.refresh();
     if (token.token) setAction({ type: 'reveal', token: token.token });
@@ -61,8 +79,22 @@ export function TokenManager({ path, detailId, selfService = false, readOnly = f
       ? <Link className="button button-sm" href={`/console/tokens/${encodeURIComponent(token.id)}`}>{t('details')}</Link>
       : <button type="button" className="button button-sm" onClick={() => setAction({ type: 'details', token })}>{t('details')}</button>;
   }
+  async function copy(token: GatewayToken) {
+    setCopyError(false);
+    setCopyingId(token.id);
+    try {
+      const result = await api<{ token: string }>(`${path}/${encodeURIComponent(token.id)}/secret`);
+      await navigator.clipboard.writeText(result.token);
+      setCopiedId(token.id);
+    } catch {
+      setCopyError(true);
+    } finally {
+      setCopyingId(null);
+    }
+  }
   return (
     <>
+      {copyError && <p className="quota-warning" role="alert">{t('copyFailed')}</p>}
       <div className="toolbar">
         <div className="muted">{t('tokenHint')}</div>
         <div className="actions">
@@ -85,11 +117,13 @@ export function TokenManager({ path, detailId, selfService = false, readOnly = f
               <tbody>{rows.map((token) => {
                 const status = token.expires_at && new Date(token.expires_at).getTime() <= Date.now() ? 'expired' : token.status ?? 'active';
                 return <tr key={token.id}>
-                  <td><strong>{token.name}</strong><code className="subline">{token.prefix}</code></td>
+                  <td><strong>{token.name}</strong><code className="subline">{maskPrefix(token.prefix)}</code></td>
                   <td><StatusChip status={status} /></td>
                   <td><Time value={token.last_used_at} /></td><td><Time value={token.created_at} /></td>
                   <td><div className="actions row-actions">
                     {details(token)}
+                    {readOnly && <button type="button" className="button button-sm" disabled={!token.can_copy || copyingId === token.id}
+                      onClick={() => void copy(token)}>{t(copiedId === token.id ? 'copied' : 'copy')}</button>}
                     {!readOnly && status !== 'revoked' && status !== 'expired' && <>
                       {selfService && <button type="button" className="button button-sm" onClick={() => setAction({ type: 'rotate', token })}>{t('rotate')}</button>}
                       <button type="button" className="button button-sm button-text-danger" onClick={() => setAction({ type: 'revoke', token })}>{t('revoke')}</button>
@@ -206,4 +240,13 @@ function RotateToken({ path, onClose, onIssued }: { path: string; onClose: () =>
       </div>
     </Dialog>
   );
+}
+
+function maskToken(token: string) {
+  const prefix = token.split('.', 1)[0];
+  return `${prefix}••••••••`;
+}
+
+function maskPrefix(prefix: string) {
+  return `${prefix}••••••••`;
 }

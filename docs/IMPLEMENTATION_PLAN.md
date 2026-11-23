@@ -32,7 +32,7 @@ Context7 官方资料区分 API Key、账户/Teamspace 使用量和访问权限�
 | 参考产品能力 | Context7 Gateway 的对应实现 | 首期状态 |
 |---|---|---|
 | 上游 API Key 池 | 管理员增删/启停/验证 Context7 Key，支持单条与批量导入；按管理员声明的池/账户范围调度；前端只显示脱敏值 | 必须 |
-| 下游访问 Token | 管理员签发和管理 Gateway Key；新用户注册成功时后端自动签发一把并在首次进入控制台时一次性展示，用户端只读；服务端只存不可逆摘要 | 必须 |
+| 下游访问 Token | 管理员签发和管理 Gateway Key；新用户注册成功时后端自动签发一把，用户端只读并始终显示掩码，通过复制接口按需解密完整值；服务端同时保存不可逆摘要和 Token-ID 绑定的密文 | 必须 |
 | MCP 网关 | 代理官方 Context7 MCP；转发 Streamable HTTP/JSON-RPC 及必要的 SSE/session 语义 | 必须 |
 | HTTP API 网关 | 代理官方文档化的 Search、Fetch、Library Search、Context、Usage 等只读接口 | 必须 |
 | 使用量/配额 | 用户本地配额、使用统计；管理员配置计划与额度；上游用量另行展示 | 必须 |
@@ -96,7 +96,7 @@ MCP/HTTP Client
 | `auth_sessions` / `oauth_states` / `admin_passkeys` / `admin_password_sessions` | 用户与管理员会话分开存储；OAuth state 一次性、短时有效；管理员 Passkey credential ID、公钥材料、计数器和注册时间；密码会话保存版本绑定摘要与有效期，不保存密码或 Argon2id 哈希 |
 | `upstream_pools` | `id`、名称、用途/账务范围标签、调度策略、启用状态；池不可混合不同账户/Teamspace 边界 |
 | `upstream_keys` | `id`、`pool_id`、密文、nonce/key version、展示用前缀、状态(`active/disabled/invalid/permission_error/rate_limited`)、最近验证/成功/失败时间、限流截止时间、上次使用时间 |
-| `gateway_tokens` | `id`、`user_id`、摘要、唯一前缀、名称/备注、权限范围、状态、可选过期时间、创建/最后使用/撤销时间 |
+| `gateway_tokens` | `id`、`user_id`、认证摘要、Token-ID 绑定的加密密文、唯一前缀、名称/备注、权限范围、状态、可选过期时间、创建/最后使用/撤销时间 |
 | `mcp_sessions` | 仅旧式上游 session 使用：Gateway session ID 摘要、所属 Token、绑定的上游 Key、加密保存的上游 session ID、过期时间、关闭时间；session 只能被创建它的 Gateway Token 使用。新式 MCP 无上游 session 时不创建记录 |
 | `quota_plans` / `user_quota_assignments` | 管理员定义的本地请求速率、小时/日/月业务单位额度、有效期和计划版本；配额默认拒绝超额请求 |
 | `usage_events` | `id`、用户/Token/池/上游 Key ID、操作名、开始时间、耗时、网关状态、上游状态、计费单位、请求关联 ID；不包含原始 body/响应 |
@@ -124,7 +124,7 @@ MCP/HTTP Client
 ### 用户控制台 API
 
 - `GET /api/user/me`：当前账户、状态及本地计划摘要。
-- `GET /api/user/tokens`：用户只读查看自己的 Token 摘要；用户端不提供创建、轮换或撤销。注册回调自动签发首个 Gateway Key，`GET /api/user/initial-token` 通过短期 HttpOnly Cookie 一次性交付，`POST /api/user/initial-token/acknowledge` 清除交付 Cookie。管理员继续通过 `/api/admin/users/:id/tokens` 创建和撤销。
+- `GET /api/user/tokens`：用户只读查看自己的 Token 掩码；`GET /api/user/tokens/:id/secret` 仅在当前用户会话下解密完整 Token 供复制，不在页面显示。用户端不提供创建、轮换或撤销。注册回调自动签发首个 Gateway Key，`GET /api/user/initial-token` 通过短期 HttpOnly Cookie 交付掩码/复制能力，`POST /api/user/initial-token/acknowledge` 清除交付 Cookie。管理员继续通过 `/api/admin/users/:id/tokens` 创建和撤销。
 - `GET /api/user/usage/summary`、`GET /api/user/usage/events`：本地用量聚合与分页请求记录。
 - `GET /api/user/service-status`：网关整体可用性与用户自身 Token 状态；不得泄露池内 Key 数量、Key Hint、其他用户或 Teamspace usage。
 - `GET /api/user/setup-guides`：返回基于部署公开 Origin、客户端、选中 Gateway Token 前缀生成的接入片段；Token 值用环境变量占位符表示。

@@ -746,6 +746,8 @@ pub async fn create_gateway_token(
     }
     let issued = issue_gateway_token(state.config.token_pepper)
         .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
+    let cipher = CredentialCipher::new(state.config.encryption_key)
+        .map_err(|_| ApiError::new(ApiErrorCode::NotConfigured))?;
     let token = insert_gateway_token(
         &state.pool,
         &user_id,
@@ -753,6 +755,7 @@ pub async fn create_gateway_token(
         issued,
         expires.as_deref(),
         &scopes,
+        &cipher,
     )
     .await?;
     write_audit(
@@ -1023,9 +1026,13 @@ async fn insert_gateway_token(
     issued: IssuedGatewayToken,
     expires: Option<&str>,
     scopes: &str,
+    cipher: &CredentialCipher,
 ) -> Result<CreatedGatewayToken, ApiError> {
+    let encrypted = cipher
+        .encrypt_gateway_token(&issued.id, &issued.raw_token)
+        .map_err(|_| ApiError::new(ApiErrorCode::InternalError))?;
     let record = sqlx::query_as::<_, (String, String, Option<String>)>(
-        "INSERT INTO gateway_tokens(id, user_id, token_digest, prefix, name, expires_at, scopes_json) VALUES (?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', ?) END, ?) RETURNING id, created_at, expires_at",
+        "INSERT INTO gateway_tokens(id, user_id, token_digest, prefix, name, expires_at, scopes_json, token_ciphertext, token_nonce, token_encryption_version) VALUES (?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', ?) END, ?, ?, ?, 1) RETURNING id, created_at, expires_at",
     )
     .bind(&issued.id.0)
     .bind(user_id)
@@ -1035,6 +1042,8 @@ async fn insert_gateway_token(
     .bind(expires)
     .bind(expires)
     .bind(scopes)
+    .bind(encrypted.ciphertext)
+    .bind(encrypted.nonce.to_vec())
     .fetch_one(pool)
     .await
     .map_err(map_database_error)?;
