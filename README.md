@@ -107,3 +107,7 @@ Branch, tag and `sha-*` tags are published by [`.github/workflows/container.yml`
 - [`docs/phase0-operator-record.md`](docs/phase0-operator-record.md): operator declaration of upstream key responsibility and the runtime registration prerequisites.
 - [`docs/admin-auth.md`](docs/admin-auth.md): administrator password login, optional Passkeys, and recovery.
 - [`docs/quota-and-billing.md`](docs/quota-and-billing.md): quota, usage, credits, redemptions and disabled payment sandbox.
+
+## Community
+
+- [Linux.do](https://linux.do/)
