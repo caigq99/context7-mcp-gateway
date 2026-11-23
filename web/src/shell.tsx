@@ -113,7 +113,7 @@ function Application() {
       {menuOpen && <button className="mobile-backdrop" aria-label={t('close')} onClick={() => setMenuOpen(false)} />}
       <aside className={`sidebar${menuOpen ? ' sidebar-open' : ''}`} aria-label={t('navLabel')}>
         <Link className="brand" href={admin ? '/admin/dashboard' : '/console/dashboard'}>
-          <span className="brand-mark"><BookOpenText size={19} aria-hidden="true" /></span>
+          <span className="brand-mark" style={{ fontWeight: 800, fontSize: 13, fontFamily: 'var(--font-mono)' }}>C7</span>
           <span className="brand-type"><strong>Context7</strong><small>GATEWAY</small></span>
           <button className="mobile-close" aria-label={t('close')} onClick={(event) => { event.preventDefault(); setMenuOpen(false); }}><X size={18} /></button>
         </Link>
@@ -138,7 +138,11 @@ function Application() {
           <div className="topbar-left"><button className="mobile-menu" type="button" aria-label={t('smallScreenMenu')} aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}><Menu size={20} aria-hidden="true" /></button>
             <nav className="breadcrumb" aria-label="Breadcrumb"><Link href={admin ? '/admin/dashboard' : '/console/dashboard'}>{t(admin ? 'adminConsole' : 'workspace')}</Link><span aria-hidden="true">/</span><strong>{resource ? t(routeLabels[base] ?? (admin ? 'adminConsole' : 'dashboard')) : t('unknownRoute')}</strong></nav>
           </div>
-          <div className="topbar-actions"><span className="environment-pill"><i aria-hidden="true" />{t('gateway')}</span>
+          <div className="topbar-actions">
+            <div className="service-health-ticker">
+              <span className="status-dot-emerald"></span>
+              <span>{admin ? 'GATEWAY · ADMIN' : 'GATEWAY · OPERATIONAL'}</span>
+            </div>
             <button className="avatar small" aria-label={currentUser?.display_name ?? t('adminConsole')} onClick={() => setUserMenuOpen((value) => !value)}>{(admin ? 'A' : currentUser?.display_name.slice(0, 1) ?? 'G').toLocaleUpperCase()}</button>
           </div>
           {userMenuOpen && <div className="user-menu" role="menu"><button role="menuitem" type="button" onClick={() => { setLocale(locale === 'zh-CN' ? 'en' : 'zh-CN'); setUserMenuOpen(false); }}><Languages size={15} />{t('language')}</button>

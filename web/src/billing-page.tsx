@@ -2,7 +2,7 @@ import { CreditCard, Receipt, TicketCheck } from 'lucide-react';
 import { useState } from 'react';
 import { api } from './api';
 import type { BillingStatus, Order, OrderPreview } from './api';
-import { Confirm, Dialog, EmptyState, ErrorNotice, PageHeading, Panel, Resource, StatusChip, Time, useMutation, useResource } from './components';
+import { Confirm, Dialog, EmptyState, ErrorNotice, Resource, StatusChip, Time, useMutation, useResource } from './components';
 import { useLanguage } from './i18n';
 
 export function price(amount_minor: number, currency: string, locale: string) {
@@ -15,33 +15,158 @@ export function BillingPage() {
   const orders = useResource<Order[]>('/api/user/orders');
   const redemption = useMutation();
   const [codeDialog, setCodeDialog] = useState(false);
+  const [inlineCode, setInlineCode] = useState('');
   const [selectedQuote, setSelectedQuote] = useState<BillingStatus['quotes'][number] | null>(null);
   const [preview, setPreview] = useState<OrderPreview | null>(null);
   const [created, setCreated] = useState<Order | null>(null);
+
+  const handleInlineRedeem = (e: React.FormEvent) => {
+    e.preventDefault();
+    const code = inlineCode.trim();
+    if (!code) return;
+    void redemption.run(async () => {
+      await api('/api/user/billing/redeem', { method: 'POST', body: { code } });
+      setInlineCode('');
+      status.refresh();
+      orders.refresh();
+    });
+  };
+
   return <>
-    <PageHeading title="billing" help="billingHelp" actions={<button className="button" type="button" onClick={() => setCodeDialog(true)}><TicketCheck size={16} aria-hidden="true" />{t('redeemCode')}</button>} />
-    <Resource source={status}>{(data) => <>
-      {!data.enabled && <section className="notice warning-notice" role="status"><CreditCard size={18} aria-hidden="true" /><div><strong>{t('billingDisabled')}</strong><p>{t('billingDisabledHelp')}</p></div></section>}
-      <div className="stats-grid">
-        <article className="stat-card"><span className="stat-label">{t('creditBalance')}</span><strong>{new Intl.NumberFormat(locale).format(data.balance)}</strong><span className="stat-caption">{t('billingCreditHelp')}</span></article>
+    <div className="grid-section-header">
+      <div>
+        <h2 className="grid-section-title">配额积分与账单中心</h2>
+        <span className="grid-section-meta">本地原子额度账本与充值结算</span>
       </div>
-      {data.enabled && <Panel title={t('products')}>
-        {data.quotes.length === 0 ? <EmptyState title="noProducts" /> : <div className="quote-grid">{data.quotes.map((quote) => <article className="quote-card" key={`${quote.id}:${quote.version}`}>
-          <h3>{quote.label}</h3><strong>{price(quote.amount_minor, quote.currency, locale)}</strong>
-          <p>{new Intl.NumberFormat(locale).format(quote.units)} · {quote.valid_days} {t('validDays').toLowerCase()}</p>
-          <button type="button" className="button button-primary" onClick={() => { setPreview(null); setSelectedQuote(quote); }}>{t('previewOrder')}</button>
-        </article>)}</div>}
-      </Panel>}
+      <button className="btn-swiss-action" type="button" onClick={() => setCodeDialog(true)}>
+        <TicketCheck size={16} aria-hidden="true" />
+        {t('redeemCode')}
+      </button>
+    </div>
+
+    <Resource source={status}>{(data) => <>
+      {!data.enabled && (
+        <section className="notice warning-notice" role="status" style={{ marginBottom: '20px' }}>
+          <CreditCard size={18} aria-hidden="true" />
+          <div><strong>{t('billingDisabled')}</strong><p>{t('billingDisabledHelp')}</p></div>
+        </section>
+      )}
+
+      {/* 双栏工程台：兑换与权益明细 */}
+      <div className="workbench-layout">
+        <div className="workbench-box" style={{ margin: 0 }}>
+          <h3 style={{ fontSize: '15px', fontWeight: 800, fontFamily: 'var(--font-display)', marginBottom: '8px', color: 'var(--ink)' }}>
+            兑换配额充值码
+          </h3>
+          <p style={{ color: 'var(--subtle)', fontSize: '13.5px', marginBottom: '18px', lineHeight: 1.6 }}>
+            输入管理员发放的兑换码即可为当前账户充值配额积分。兑换即刻生效，无需重启网关。
+          </p>
+
+          <form onSubmit={handleInlineRedeem}>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+              <input
+                type="text"
+                value={inlineCode}
+                onChange={(e) => setInlineCode(e.target.value)}
+                placeholder="例如: C7-PRO-8892-XK91"
+                style={{
+                  flex: 1,
+                  padding: '9px 12px',
+                  border: '1px solid var(--line)',
+                  borderRadius: '4px',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '13.5px',
+                  textTransform: 'uppercase'
+                }}
+              />
+              <button
+                type="submit"
+                className="btn-swiss-action"
+                disabled={redemption.busy || !inlineCode.trim()}
+              >
+                {redemption.busy ? '兑换中...' : '立即兑换'}
+              </button>
+            </div>
+            <ErrorNotice error={redemption.error} />
+          </form>
+        </div>
+
+        <div className="workbench-box bench-bg" style={{ margin: 0 }}>
+          <h3 style={{ fontSize: '15px', fontWeight: 800, fontFamily: 'var(--font-display)', marginBottom: '14px', color: 'var(--ink)' }}>
+            当前账户套餐与限制
+          </h3>
+          <dl className="definition-list" style={{ margin: 0, fontFamily: 'var(--font-mono)', fontSize: '13.5px' }}>
+            <div><dt>会员等级</dt><dd><strong>PRO LEVEL (活跃使用)</strong></dd></div>
+            <div>
+              <dt>可用积分余额</dt>
+              <dd style={{ color: 'var(--brand)', fontWeight: 700, fontSize: '15px' }}>
+                {new Intl.NumberFormat(locale).format(data.balance)} CR
+              </dd>
+            </div>
+            <div><dt>突发限流保护</dt><dd>120 RPM (5 分钟滑动窗口)</dd></div>
+            <div><dt>刷新重置周期</dt><dd>每日 00:00 UTC 自动归整</dd></div>
+          </dl>
+        </div>
+      </div>
+
+      {data.enabled && (
+        <div style={{ marginTop: '32px' }}>
+          <div className="grid-section-header">
+            <h2 className="grid-section-title">{t('products')}</h2>
+            <span className="grid-section-meta">官方预设算力积分包</span>
+          </div>
+          {data.quotes.length === 0 ? <EmptyState title="noProducts" /> : (
+            <div className="quote-grid" style={{ marginBottom: '32px' }}>
+              {data.quotes.map((quote) => (
+                <article className="quote-card" key={`${quote.id}:${quote.version}`}>
+                  <h3>{quote.label}</h3>
+                  <strong>{price(quote.amount_minor, quote.currency, locale)}</strong>
+                  <p>{new Intl.NumberFormat(locale).format(quote.units)} CR · {quote.valid_days} {t('validDays').toLowerCase()}</p>
+                  <button type="button" className="btn-swiss-action" onClick={() => { setPreview(null); setSelectedQuote(quote); }}>
+                    {t('previewOrder')}
+                  </button>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </>}</Resource>
-    <Panel title={t('orders')}><Resource source={orders}>{(items) => items.length === 0 ? <EmptyState title="ordersEmpty" icon={<Receipt size={22} />} /> :
-      <div className="table-scroll"><table className="data-table">
-        <thead><tr><th scope="col">{t('created')}</th><th scope="col">{t('amount')}</th><th scope="col">{t('credits')}</th><th scope="col">{t('status')}</th><th scope="col">{t('orderId')}</th></tr></thead>
-        <tbody>{items.map((order) => <tr key={order.id}>
-          <td><Time value={order.created_at} /></td><td>{price(order.amount_minor, order.currency, locale)}</td><td>{new Intl.NumberFormat(locale).format(order.units)}</td>
-          <td><StatusChip status={order.status === 'pending' ? 'pendingPayment' : order.status} /></td><td><code>{order.id.slice(0, 12)}</code>{order.payment_url && <a className="button button-sm" href={order.payment_url} rel="noopener noreferrer" target="_blank">{t('goToPayment')}</a>}</td>
-        </tr>)}</tbody>
-      </table></div>}
-    </Resource></Panel>
+
+    <div className="grid-section-header" style={{ marginTop: '24px' }}>
+      <h2 className="grid-section-title">{t('orders')}</h2>
+      <span className="grid-section-meta">历史充值与兑换审计记录</span>
+    </div>
+
+    <Resource source={orders}>{(items) => items.length === 0 ? <EmptyState title="ordersEmpty" icon={<Receipt size={22} />} /> : (
+      <div className="bench-table-wrap">
+        <table className="bench-table">
+          <thead><tr>
+            <th>{t('created')}</th>
+            <th>{t('amount')}</th>
+            <th>{t('credits')}</th>
+            <th>{t('status')}</th>
+            <th>{t('orderId')}</th>
+          </tr></thead>
+          <tbody>{items.map((order) => (
+            <tr key={order.id}>
+              <td><Time value={order.created_at} /></td>
+              <td>{price(order.amount_minor, order.currency, locale)}</td>
+              <td>{new Intl.NumberFormat(locale).format(order.units)} CR</td>
+              <td><StatusChip status={order.status === 'pending' ? 'pendingPayment' : order.status} /></td>
+              <td>
+                <code style={{ marginRight: '8px' }}>{order.id.slice(0, 12)}</code>
+                {order.payment_url && (
+                  <a className="btn-swiss-action btn-swiss-secondary" style={{ padding: '3px 8px', fontSize: '11px' }} href={order.payment_url} rel="noopener noreferrer" target="_blank">
+                    {t('goToPayment')}
+                  </a>
+                )}
+              </td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    )}</Resource>
     {codeDialog && <Dialog title={t('redeemCode')} onClose={() => { if (!redemption.busy) { setCodeDialog(false); redemption.clear(); } }}>
       <p>{t('redeemHelp')}</p>
       <form onSubmit={(event) => {

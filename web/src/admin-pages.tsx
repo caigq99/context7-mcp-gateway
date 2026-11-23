@@ -39,12 +39,12 @@ export function PoolPage({ poolId }: { poolId?: string }) {
         <RefreshCw size={16} aria-hidden="true" />
       </button>}>
         {items.length === 0 ? <EmptyState title="poolEmpty" hint="poolEmptyHelp" icon={<Database size={22} />} /> :
-          <div className="table-scroll"><table className="data-table">
-            <thead><tr><th scope="col">{t('poolName')}</th><th scope="col">{t('scope')}</th><th scope="col">{t('status')}</th><th scope="col">{t('created')}</th><th scope="col"><span className="sr-only">{t('details')}</span></th></tr></thead>
+          <div className="bench-table-wrap"><table className="bench-table">
+            <thead><tr><th>{t('poolName')}</th><th>{t('scope')}</th><th>{t('status')}</th><th>{t('created')}</th><th>操作</th></tr></thead>
             <tbody>{items.map((pool) => <tr key={pool.id}>
-              <td><strong>{pool.name}</strong></td><td>{pool.authorization_scope}</td>
+              <td><strong>{pool.name}</strong></td><td><code>{pool.authorization_scope}</code></td>
               <td><StatusChip status={pool.enabled ? 'enabled' : 'disabled'} /></td><td><Time value={pool.created_at} /></td>
-              <td><Link className="button button-sm" href={`/admin/pools/${encodeURIComponent(pool.id)}`}>{t('managePool')}</Link></td>
+              <td><Link className="btn-swiss-action btn-swiss-secondary" style={{ padding: '3px 8px', fontSize: '11px' }} href={`/admin/pools/${encodeURIComponent(pool.id)}`}>{t('managePool')}</Link></td>
             </tr>)}</tbody>
           </table></div>}
       </Panel>;
@@ -119,31 +119,51 @@ function PoolDetails({ pool, refresh }: { pool: Pool; refresh: () => void }) {
       <ErrorNotice error={mutation.error} />
       {validation && <div className="notice" role="status"><span>{t('validationComplete')}</span><StatusChip status={validation.status} /><code>HTTP {validation.upstream_status}</code></div>}
       <Resource source={keys}>{(items) => items.length === 0 ? <EmptyState title="poolKeyEmpty" hint="poolKeyEmptyHelp" icon={<KeyRound size={22} />} /> :
-        <div className="table-scroll"><table className="data-table">
-          <thead><tr><th scope="col">{t('keyPrefix')}</th><th scope="col">{t('status')}</th><th scope="col">{t('lastChecked')}</th><th scope="col">{t('lastUsed')}</th><th scope="col"><span className="sr-only">{t('details')}</span></th></tr></thead>
-          <tbody>{items.map((key) => <tr key={key.id}>
-            <td><code>{key.display_prefix}</code></td><td><StatusChip status={key.status} /></td>
-            <td><Time value={key.last_checked_at} /></td><td><Time value={key.last_used_at} /></td>
-            <td><div className="actions row-actions">
-              <button type="button" className="button button-sm" disabled={mutation.busy || key.status === 'disabled'} onClick={() => {
-                setValidation(null);
-                void mutation.run(async () => {
-                  const result = await api<{ status: string; upstream_status: number }>(`${keyPath(key)}/validate`, { method: 'POST' });
-                  setValidation(result);
-                  keys.refresh();
-                });
-              }}>{t('validate')}</button>
-              <button type="button" className="button button-sm" onClick={() => setAction({ type: 'usage', key })}>{t('upstreamUsage')}</button>
-              {key.status === 'disabled'
-                ? <button type="button" className="button button-sm" disabled={mutation.busy} onClick={() => void mutation.run(async () => {
-                  await api<void>(`${keyPath(key)}/status`, { method: 'PATCH', body: { status: 'active' } });
-                  setValidation(null);
-                  keys.refresh();
-                })}>{t('enable')}</button>
-                : <button type="button" className="button button-sm button-text-danger" onClick={() => setAction({ type: 'disable', key })}>{t('disable')}</button>}
-              <button type="button" className="button button-sm button-text-danger" onClick={() => setAction({ type: 'delete', key })}>{t('remove')}</button>
-            </div></td>
-          </tr>)}</tbody>
+        <div className="bench-table-wrap"><table className="bench-table">
+          <thead><tr>
+            <th>插槽编号</th>
+            <th>{t('keyPrefix')}</th>
+            <th>{t('status')}</th>
+            <th>{t('lastChecked')}</th>
+            <th>{t('lastUsed')}</th>
+            <th>操作</th>
+          </tr></thead>
+          <tbody>{items.map((key, idx) => {
+            const isOnline = key.status === 'active';
+            return (
+              <tr key={key.id}>
+                <td><code>#{String(idx + 1).padStart(2, '0')}</code></td>
+                <td><code style={{ color: 'var(--brand)' }}>{key.display_prefix}</code></td>
+                <td>
+                  <span className="key-badge-status" style={{ color: isOnline ? 'var(--good)' : 'var(--quiet)' }}>
+                    <span className="status-dot-emerald" style={{ background: isOnline ? 'var(--good)' : 'var(--quiet)' }} />
+                    {isOnline ? '就绪在线' : key.status}
+                  </span>
+                </td>
+                <td><Time value={key.last_checked_at} /></td>
+                <td><Time value={key.last_used_at} /></td>
+                <td><div className="actions row-actions" style={{ gap: '6px' }}>
+                  <button type="button" className="btn-swiss-action btn-swiss-secondary" style={{ padding: '3px 8px', fontSize: '11px' }} disabled={mutation.busy || key.status === 'disabled'} onClick={() => {
+                    setValidation(null);
+                    void mutation.run(async () => {
+                      const result = await api<{ status: string; upstream_status: number }>(`${keyPath(key)}/validate`, { method: 'POST' });
+                      setValidation(result);
+                      keys.refresh();
+                    });
+                  }}>{t('validate')}</button>
+                  <button type="button" className="btn-swiss-action btn-swiss-secondary" style={{ padding: '3px 8px', fontSize: '11px' }} onClick={() => setAction({ type: 'usage', key })}>{t('upstreamUsage')}</button>
+                  {key.status === 'disabled'
+                    ? <button type="button" className="btn-swiss-action" style={{ padding: '3px 8px', fontSize: '11px' }} disabled={mutation.busy} onClick={() => void mutation.run(async () => {
+                      await api<void>(`${keyPath(key)}/status`, { method: 'PATCH', body: { status: 'active' } });
+                      setValidation(null);
+                      keys.refresh();
+                    })}>{t('enable')}</button>
+                    : <button type="button" className="btn-swiss-action btn-swiss-secondary" style={{ padding: '3px 8px', fontSize: '11px' }} onClick={() => setAction({ type: 'disable', key })}>{t('disable')}</button>}
+                  <button type="button" className="btn-swiss-action btn-swiss-secondary" style={{ padding: '3px 8px', fontSize: '11px', color: 'var(--bad)' }} onClick={() => setAction({ type: 'delete', key })}>{t('remove')}</button>
+                </div></td>
+              </tr>
+            );
+          })}</tbody>
         </table></div>}
       </Resource>
     </Panel>

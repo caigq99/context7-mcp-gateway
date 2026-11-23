@@ -237,7 +237,7 @@ test('overview renders real quota status, usage and request activity', async ({ 
   await page.goto('/console/dashboard');
   await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
   await expect(page.getByText('Available', { exact: true })).toBeVisible();
-  await expect(page.getByText('Requests / 5 min')).toBeVisible();
+  await expect(page.getByText('5 分钟突发限速')).toBeVisible();
   await expect(page.getByRole('cell', { name: 'MCP · Tool call' })).toBeVisible();
   await expect(page.getByText('Maintenance')).toBeVisible();
 });
@@ -283,12 +283,11 @@ test('REST and MCP client templates use the deployment origin and a placeholder'
   await page.goto('/console/setup');
   await expect(page.getByText('https://gateway.example.test/mcp', { exact: true })).toBeVisible();
   await expect(page.getByText('GATEWAY_API_KEY', { exact: false }).first()).toBeVisible();
-  const client = page.getByLabel('Client');
-  await client.selectOption('rest');
+  await page.getByRole('button', { name: 'REST · curl' }).click();
   await expect(page.getByText('/v3/search', { exact: false })).toBeVisible();
   await expect(page.getByText('API key', { exact: false }).first()).toBeVisible();
   const endpoint = page.getByLabel('REST endpoint');
-  const output = page.locator('.code-block pre').last();
+  const output = page.locator('.code-swiss-print').first();
   for (const [operation, path] of [
     ['fetch_v3', '/v3/fetch'], ['library_search_v2', '/v2/libs/search'], ['context_v2', '/v2/context'],
   ]) {
@@ -435,5 +434,5 @@ test('mobile navigation and keyboard focus remain usable', async ({ page }) => {
   await expect(page.getByRole('navigation', { name: 'Console navigation' })).toBeVisible();
   await page.getByRole('navigation', { name: 'Console navigation' }).getByRole('link', { name: 'Client setup' }).click();
   await expect(page).toHaveURL(/\/console\/setup$/);
-  await expect(page.getByRole('heading', { name: 'Client setup' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '客户端快速接入向导' })).toBeVisible();
 });

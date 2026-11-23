@@ -2,7 +2,7 @@ import { KeyRound, Plus, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api } from './api';
 import type { GatewayToken } from './api';
-import { Confirm, CopyBlock, Dialog, EmptyState, ErrorNotice, PageHeading, Panel, Resource, StatusChip, Time, useMutation, useResource } from './components';
+import { Confirm, CopyBlock, Dialog, EmptyState, ErrorNotice, Resource, StatusChip, Time, useMutation, useResource } from './components';
 import { useLanguage } from './i18n';
 import { Link } from './navigation';
 
@@ -54,10 +54,21 @@ export function TokenPage({ detailId }: { detailId?: string }) {
   const { t } = useLanguage();
   return (
     <>
-      <PageHeading title="tokens" help="tokensHelp" actions={detailId && <Link className="button" href="/console/tokens">{t('backToTokens')}</Link>} />
-      <Panel title={t('tokens')}>
-        <TokenManager path="/api/user/tokens" detailId={detailId} selfService readOnly />
-      </Panel>
+      <div className="grid-section-header">
+        <div>
+          <h2 className="grid-section-title">网关密钥清单</h2>
+          <span className="grid-section-meta">客户端连接 Context7 网关的唯一鉴权凭据</span>
+        </div>
+        {detailId && (
+          <Link className="btn-swiss-action btn-swiss-secondary" href="/console/tokens">
+            {t('backToTokens')}
+          </Link>
+        )}
+      </div>
+      <p style={{ color: 'var(--subtle)', marginBottom: '20px', fontSize: '13.5px', lineHeight: 1.6 }}>
+        Gateway Token 是客户端访问本网关的唯一凭据。网关会自动映射下游请求至上游健康密钥池，同时维护原子配额与调用审计。
+      </p>
+      <TokenManager path="/api/user/tokens" detailId={detailId} selfService readOnly />
     </>
   );
 }
@@ -76,8 +87,8 @@ export function TokenManager({ path, detailId, selfService = false, readOnly = f
   }
   function details(token: GatewayToken) {
     return selfService
-      ? <Link className="button button-sm" href={`/console/tokens/${encodeURIComponent(token.id)}`}>{t('details')}</Link>
-      : <button type="button" className="button button-sm" onClick={() => setAction({ type: 'details', token })}>{t('details')}</button>;
+      ? <Link className="btn-swiss-action btn-swiss-secondary" style={{ padding: '4px 10px', fontSize: '11px' }} href={`/console/tokens/${encodeURIComponent(token.id)}`}>{t('details')}</Link>
+      : <button type="button" className="btn-swiss-action btn-swiss-secondary" style={{ padding: '4px 10px', fontSize: '11px' }} onClick={() => setAction({ type: 'details', token })}>{t('details')}</button>;
   }
   async function copy(token: GatewayToken) {
     setCopyError(false);
@@ -95,38 +106,82 @@ export function TokenManager({ path, detailId, selfService = false, readOnly = f
   return (
     <>
       {copyError && <p className="quota-warning" role="alert">{t('copyFailed')}</p>}
-      <div className="toolbar">
+      <div className="toolbar" style={{ marginBottom: '16px' }}>
         <div className="muted">{t('tokenHint')}</div>
         <div className="actions">
           <button type="button" className="button button-quiet icon-button" onClick={tokens.refresh} aria-label={t('refresh')}>
             <RefreshCw size={16} aria-hidden="true" />
           </button>
-          {!readOnly && <button type="button" className="button button-primary" disabled={disabled} onClick={() => setAction({ type: 'create' })}>
-            <Plus size={17} aria-hidden="true" />{t('createKey')}
-          </button>}
+          {!readOnly && (
+            <button type="button" className="btn-swiss-action" disabled={disabled} onClick={() => setAction({ type: 'create' })}>
+              <Plus size={16} aria-hidden="true" />
+              {t('createKey')}
+            </button>
+          )}
         </div>
       </div>
       <Resource source={tokens}>{(rows) => rows.length === 0
         ? <EmptyState title="tokenEmpty" hint={readOnly ? 'tokenReadOnlyEmptyHelp' : 'tokenEmptyHelp'} icon={<KeyRound size={22} />} />
-        : <div className="table-scroll">
-            <table className="data-table">
+        : <div className="bench-table-wrap">
+            <table className="bench-table">
               <thead><tr>
-                <th scope="col">{t('key')}</th><th scope="col">{t('status')}</th>
-                <th scope="col">{t('lastUsed')}</th><th scope="col">{t('created')}</th><th scope="col"><span className="sr-only">{t('details')}</span></th>
+                <th>密钥名称与标识</th>
+                <th>授权范围</th>
+                <th>创建时间</th>
+                <th>最后活跃</th>
+                <th>状态</th>
+                <th>操作</th>
               </tr></thead>
               <tbody>{rows.map((token) => {
                 const status = token.expires_at && new Date(token.expires_at).getTime() <= Date.now() ? 'expired' : token.status ?? 'active';
+                const isGood = status === 'active';
                 return <tr key={token.id}>
-                  <td><strong>{token.name}</strong><code className="subline">{maskPrefix(token.prefix)}</code></td>
-                  <td><StatusChip status={status} /></td>
-                  <td><Time value={token.last_used_at} /></td><td><Time value={token.created_at} /></td>
-                  <td><div className="actions row-actions">
+                  <td>
+                    <strong style={{ fontFamily: 'var(--font-display)', color: 'var(--ink)' }}>{token.name}</strong>
+                    <br />
+                    <code style={{ color: 'var(--brand)', fontFamily: 'var(--font-mono)' }}>{maskPrefix(token.prefix)}</code>
+                  </td>
+                  <td><code>{token.scopes?.join(' / ') || 'mcp:all'}</code></td>
+                  <td><Time value={token.created_at} /></td>
+                  <td>{token.last_used_at ? <Time value={token.last_used_at} /> : <span style={{ color: 'var(--quiet)' }}>从未调用</span>}</td>
+                  <td>
+                    <span className="key-badge-status" style={{ color: isGood ? 'var(--good)' : 'var(--bad)' }}>
+                      <span className="status-dot-emerald" style={{ background: isGood ? 'var(--good)' : 'var(--bad)' }}></span>
+                      {isGood ? '正常使用' : status}
+                    </span>
+                  </td>
+                  <td><div className="actions row-actions" style={{ gap: '6px' }}>
                     {details(token)}
-                    {readOnly && <button type="button" className="button button-sm" disabled={!token.can_copy || copyingId === token.id}
-                      onClick={() => void copy(token)}>{t(copiedId === token.id ? 'copied' : 'copy')}</button>}
+                    {readOnly && (
+                      <button
+                        type="button"
+                        className="btn-swiss-action btn-swiss-secondary"
+                        style={{ padding: '4px 10px', fontSize: '11px' }}
+                        disabled={!token.can_copy || copyingId === token.id}
+                        onClick={() => void copy(token)}
+                      >
+                        {t(copiedId === token.id ? 'copied' : 'copy')}
+                      </button>
+                    )}
                     {!readOnly && status !== 'revoked' && status !== 'expired' && <>
-                      {selfService && <button type="button" className="button button-sm" onClick={() => setAction({ type: 'rotate', token })}>{t('rotate')}</button>}
-                      <button type="button" className="button button-sm button-text-danger" onClick={() => setAction({ type: 'revoke', token })}>{t('revoke')}</button>
+                      {selfService && (
+                        <button
+                          type="button"
+                          className="btn-swiss-action btn-swiss-secondary"
+                          style={{ padding: '4px 10px', fontSize: '11px' }}
+                          onClick={() => setAction({ type: 'rotate', token })}
+                        >
+                          {t('rotate')}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn-swiss-action btn-swiss-secondary"
+                        style={{ padding: '4px 10px', fontSize: '11px', color: 'var(--bad)' }}
+                        onClick={() => setAction({ type: 'revoke', token })}
+                      >
+                        {t('revoke')}
+                      </button>
                     </>}
                   </div></td>
                 </tr>
